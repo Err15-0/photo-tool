@@ -26,6 +26,11 @@
       Only OpenStreetMap map tiles are downloaded (can be switched off on the map).
     </div>
     <div class="header-status">
+      {% if heif_available %}
+        <span class="pill pill-ok" title="pillow-heif {{ heif_version }}">HEIC ✓</span>
+      {% else %}
+        <span class="pill pill-bad" title="pip install pillow-heif">HEIC off</span>
+      {% endif %}
       {% if exiftool_version %}
         <span class="pill pill-ok">ExifTool {{ exiftool_version }}</span>
       {% else %}
@@ -61,7 +66,7 @@
         <button id="btn-pick-files" class="btn btn-primary" type="button">Select images…</button>
         <button id="btn-pick-folder" class="btn" type="button">Select folder…</button>
       </div>
-      <input id="input-files" type="file" multiple accept=".jpg,.jpeg,.jpe,.png,.webp,.tif,.tiff,image/jpeg,image/png,image/webp,image/tiff" hidden>
+      <input id="input-files" type="file" multiple accept=".jpg,.jpeg,.jpe,.png,.webp,.tif,.tiff,.heic,.heif,image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif" hidden>
       <input id="input-folder" type="file" multiple webkitdirectory hidden>
     </div>
     <div id="upload-progress" class="upload-progress hidden">
@@ -124,6 +129,12 @@
         <select id="sanitize-mode">
           <option value="reencode" selected>Re-encode from pixels (max removal)</option>
           <option value="lossless">Lossless strip via ExifTool (exact pixels)</option>
+        </select>
+      </label>
+      <label class="small" title="What a sanitized HEIC (iPhone) photo becomes in re-encode mode. Lossless mode always keeps HEIC.">HEIC →
+        <select id="heic-output">
+          <option value="jpeg" selected>JPEG (compatible)</option>
+          <option value="heic">keep HEIC</option>
         </select>
       </label>
       <label class="small" title="Keeps colour accuracy for wide-gamut photos. The ICC profile can reveal device vendor / profile dates.">

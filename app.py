@@ -18,7 +18,7 @@ API overview (all JSON unless noted):
     GET  /api/images/<id>               full detail incl. raw metadata + sanitization result
     GET  /images/<id>/thumb             thumbnail JPEG
     GET  /images/<id>/preview           preview JPEG (max 1600 px)
-    POST /api/sanitize                  {"ids": [...]} or {"all": true}, "mode", "keep_icc"
+    POST /api/sanitize                  {"ids": [...]} or {"all": true}, "mode", "keep_icc", "heic_output"
     GET  /images/<id>/sanitized         download one sanitized file
     POST /download/zip                  form field "ids" (comma separated) or "all=1" -> ZIP
     POST /api/clear                     delete everything in the workspace
@@ -30,6 +30,7 @@ import os
 from flask import Flask, abort, jsonify, render_template, request, send_file
 
 from photo_tool import config
+from photo_tool import heif_support
 from photo_tool.downloads import build_sanitized_zip
 from photo_tool.metadata import analyze_metadata, exiftool_version, read_metadata_batch
 from photo_tool.sanitize import SANITIZE_MODES, sanitize_images
@@ -152,6 +153,8 @@ def index():
         max_file_mb=config.MAX_FILE_SIZE // (1024 * 1024),
         max_images=config.MAX_IMAGES,
         allowed_extensions=sorted(config.ALLOWED_EXTENSIONS),
+        heif_available=heif_support.HEIF_AVAILABLE,
+        heif_version=heif_support.HEIF_VERSION,
     )
 
 
@@ -165,6 +168,8 @@ def api_status():
         "max_files_per_request": config.MAX_FILES_PER_REQUEST,
         "allowed_extensions": sorted(config.ALLOWED_EXTENSIONS),
         "sanitize_modes": list(SANITIZE_MODES),
+        "heif_available": heif_support.HEIF_AVAILABLE,
+        "heic_output_choices": list(config.HEIC_OUTPUT_CHOICES),
     })
 
 
@@ -255,6 +260,9 @@ def api_sanitize():
     if mode not in SANITIZE_MODES:
         return jsonify({"error": f"mode must be one of {list(SANITIZE_MODES)}"}), 400
     keep_icc = bool(payload.get("keep_icc", False))
+    heic_output = payload.get("heic_output", config.DEFAULT_HEIC_OUTPUT)
+    if heic_output not in config.HEIC_OUTPUT_CHOICES:
+        return jsonify({"error": f"heic_output must be one of {list(config.HEIC_OUTPUT_CHOICES)}"}), 400
     ids = payload.get("ids") or []
     if not isinstance(ids, list):
         return jsonify({"error": "ids must be a list"}), 400
@@ -263,7 +271,7 @@ def api_sanitize():
     if not records:
         return jsonify({"error": "No valid images selected for sanitization"}), 400
 
-    results = sanitize_images(records, workspace, mode=mode, keep_icc=keep_icc)
+    results = sanitize_images(records, workspace, mode=mode, keep_icc=keep_icc, heic_output=heic_output)
     return jsonify({
         "results": [
             {"id": record.id, "filename": record.original_filename, "sanitization": result}
@@ -281,7 +289,7 @@ def download_sanitized(image_id):
         abort(404, description="This image has not been sanitized yet")
     return send_file(
         path,
-        mimetype=record.mime_type,
+        mimetype=record.sanitization.get("output_mime", record.mime_type),
         as_attachment=True,
         download_name=record.sanitization["download_name"],
     )

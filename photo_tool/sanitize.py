@@ -12,6 +12,8 @@ Two sanitization modes
     Trade-off: JPEG and WebP are re-compressed (quality 95 - visually
     identical for normal use, but not bit-identical pixels).
     PNG and TIFF are lossless, so pixels are preserved exactly.
+    HEIC (iPhone) is converted to JPEG by default (heic_output="jpeg") because
+    many websites/programs cannot open HEIC; heic_output="heic" keeps HEIC.
 
 "lossless"
     ExifTool deletes all metadata it can write ("-all=") WITHOUT
@@ -38,6 +40,7 @@ from datetime import datetime, timezone
 from PIL import Image, ImageOps, JpegImagePlugin
 
 from . import config
+from . import heif_support  # noqa: F401  (registers the HEIC/HEIF Pillow plugin)
 from .downloads import sanitized_download_name
 from .metadata import (
     SENSITIVE_CATEGORIES,
@@ -70,7 +73,28 @@ class SanitizeError(Exception):
 # Step 1: write the sanitized file
 # =============================================================================
 
-def _sanitize_by_reencoding(original_path, output_path, image_format, keep_icc):
+def _flatten_for_jpeg(image):
+    """JPEG has no transparency: composite RGBA/LA/P images onto white."""
+    if image.mode in ("RGB", "L", "CMYK"):
+        return image
+    if image.mode in ("RGBA", "LA") or (image.mode == "P" and "transparency" in image.info):
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, (255, 255, 255))
+        background.paste(rgba, mask=rgba.split()[-1])
+        return background
+    return image.convert("RGB")
+
+
+def choose_output_format(record, mode, heic_output):
+    """Which Pillow format the sanitized copy will have."""
+    if record.image_format == "HEIF" and mode == "reencode" and heic_output == "jpeg":
+        return "JPEG"
+    if record.image_format == "MPO":
+        return "JPEG"
+    return record.image_format
+
+
+def _sanitize_by_reencoding(original_path, output_path, image_format, output_format, keep_icc):
     """Rebuild the image from pixels only. Returns a list of notes."""
     notes = []
     with Image.open(original_path) as image:
@@ -96,16 +120,24 @@ def _sanitize_by_reencoding(original_path, output_path, image_format, keep_icc):
         save_options["icc_profile"] = icc_profile
         notes.append("ICC colour profile kept (option enabled)")
 
-    if image_format in ("JPEG", "MPO"):
-        if clean.mode not in ("RGB", "L", "CMYK"):
-            clean = clean.convert("RGB")
+    if output_format == "JPEG":
+        clean = _flatten_for_jpeg(clean)
         save_options.update(quality=config.JPEG_SANITIZE_QUALITY, optimize=True)
         if subsampling in (0, 1, 2):
             save_options["subsampling"] = subsampling
         clean.save(output_path, "JPEG", **save_options)
-        notes.append(f"JPEG re-encoded at quality {config.JPEG_SANITIZE_QUALITY}")
+        if image_format == "HEIF":
+            notes.append(f"HEIC converted to JPEG (quality {config.JPEG_SANITIZE_QUALITY}) for maximum compatibility")
+            notes.append("HEIC extras (depth map, auxiliary images, embedded thumbnails, Live Photo link) were dropped")
+        else:
+            notes.append(f"JPEG re-encoded at quality {config.JPEG_SANITIZE_QUALITY}")
         if image_format == "MPO":
             notes.append("MPO extra embedded pictures were dropped (only the main image is kept)")
+    elif output_format == "HEIF":
+        save_options.update(quality=config.HEIF_SANITIZE_QUALITY)
+        clean.save(output_path, "HEIF", **save_options)
+        notes.append(f"HEIC re-encoded as HEIC (quality {config.HEIF_SANITIZE_QUALITY})")
+        notes.append("HEIC extras (depth map, auxiliary images, embedded thumbnails, Live Photo link) were dropped")
     elif image_format == "PNG":
         if transparency is not None:
             save_options["transparency"] = transparency
@@ -160,31 +192,44 @@ def _sanitize_with_exiftool(original_path, output_path, keep_icc):
     return notes
 
 
-def _write_sanitized_file(record, workspace, mode, keep_icc):
-    """Create the sanitized copy. Returns (output_path, notes, effective_mode)."""
-    output_path = workspace.path_for("sanitized", record.id, record.stored_extension)
+def _write_sanitized_file(record, workspace, mode, keep_icc, heic_output):
+    """
+    Create the sanitized copy.
+    Returns dict(path, notes, mode, format, extension, mime).
+    """
+    notes = []
+    effective_mode = mode
+    if mode == "reencode" and record.frame_count > 1:
+        # Re-encoding would keep only the first frame of an animation / multi-page file.
+        effective_mode = "lossless"
+        notes.append(f"Image has {record.frame_count} frames/pages: switched to lossless mode "
+                     "so no frames are lost")
+    if record.image_format == "HEIF" and effective_mode == "lossless" and heic_output == "jpeg":
+        notes.append("Lossless mode cannot convert formats: the output stays HEIC")
+
+    output_format = choose_output_format(record, effective_mode, heic_output)
+    extension, mime_type = config.FORMAT_INFO[output_format]
+    output_path = workspace.path_for("sanitized", record.id, extension)
     original_path = record.paths["original"]
     if os.path.abspath(output_path) == os.path.abspath(original_path):
         raise SanitizeError("refusing to overwrite the original")   # defensive, cannot happen
 
-    # Replace a previous sanitized copy (never the original).
-    if os.path.exists(output_path):
-        os.remove(output_path)
-
-    notes = []
-    effective_mode = mode
-    if mode == "reencode" and record.frame_count > 1:
-        # Re-encoding would keep only the first frame of an animation / multi-page TIFF.
-        effective_mode = "lossless"
-        notes.append(f"Image has {record.frame_count} frames/pages: switched to lossless mode "
-                     "so no frames are lost")
+    # Replace a previous sanitized copy (never the original). Its extension may
+    # differ (e.g. HEIC -> JPEG last time, HEIC -> HEIC now).
+    for old_path in {record.paths.get("sanitized"), output_path}:
+        if old_path and os.path.exists(old_path) and old_path != original_path:
+            os.remove(old_path)
+    record.paths.pop("sanitized", None)
 
     if effective_mode == "reencode":
-        notes += _sanitize_by_reencoding(original_path, output_path, record.image_format, keep_icc)
+        notes += _sanitize_by_reencoding(original_path, output_path, record.image_format, output_format, keep_icc)
     else:
         notes += _sanitize_with_exiftool(original_path, output_path, keep_icc)
+        if record.image_format == "HEIF":
+            notes.append("HEIC rotation is stored in the container (irot box) and is preserved")
     os.chmod(output_path, 0o600)
-    return output_path, notes, effective_mode
+    return {"path": output_path, "notes": notes, "mode": effective_mode,
+            "format": output_format, "extension": extension, "mime": mime_type}
 
 
 # =============================================================================
@@ -325,7 +370,8 @@ def _build_verification(record, output_path, mode, keep_icc, notes, metadata_res
 # Public entry point
 # =============================================================================
 
-def sanitize_images(records, workspace, mode="reencode", keep_icc=False):
+def sanitize_images(records, workspace, mode="reencode", keep_icc=False,
+                    heic_output=config.DEFAULT_HEIC_OUTPUT):
     """
     Sanitize several images. Each record gets record.sanitization filled in.
     Verification of all outputs uses ONE batched ExifTool run.
@@ -333,13 +379,14 @@ def sanitize_images(records, workspace, mode="reencode", keep_icc=False):
     """
     if mode not in SANITIZE_MODES:
         raise ValueError(f"mode must be one of {SANITIZE_MODES}")
+    if heic_output not in config.HEIC_OUTPUT_CHOICES:
+        raise ValueError(f"heic_output must be one of {config.HEIC_OUTPUT_CHOICES}")
 
-    written = []      # (record, output_path, notes, effective_mode)
+    written = []      # (record, output dict from _write_sanitized_file)
     results = []
     for record in records:
         try:
-            output_path, notes, effective_mode = _write_sanitized_file(record, workspace, mode, keep_icc)
-            written.append((record, output_path, notes, effective_mode))
+            written.append((record, _write_sanitized_file(record, workspace, mode, keep_icc, heic_output)))
         except Exception as exc:
             log.exception("Sanitization failed for %s", record.id)
             record.sanitization = {
@@ -350,19 +397,22 @@ def sanitize_images(records, workspace, mode="reencode", keep_icc=False):
             record.paths.pop("sanitized", None)
             results.append((record, record.sanitization))
 
-    metadata_by_path = read_metadata_batch([path for _r, path, _n, _m in written])
+    metadata_by_path = read_metadata_batch([output["path"] for _r, output in written])
 
-    for record, output_path, notes, effective_mode in written:
+    for record, output in written:
+        output_path, effective_mode = output["path"], output["mode"]
         verification = _build_verification(
-            record, output_path, effective_mode, keep_icc, notes, metadata_by_path[output_path]
+            record, output_path, effective_mode, keep_icc, output["notes"], metadata_by_path[output_path]
         )
         verification.update({
             "mode": effective_mode,
             "requested_mode": mode,
             "keep_icc": keep_icc,
+            "heic_output": heic_output,
             "sanitized_at": _now(),
-            "output_format": record.image_format if record.image_format != "MPO" else "JPEG",
-            "download_name": sanitized_download_name(record.original_filename, record.stored_extension),
+            "output_format": output["format"],
+            "output_mime": output["mime"],
+            "download_name": sanitized_download_name(record.original_filename, output["extension"]),
         })
         record.sanitization = verification
         record.paths["sanitized"] = output_path

@@ -60,9 +60,11 @@ def main():
         for warning in image["warnings"]:
             print(f"      warning: {warning}")
 
-    for mode in ("reencode", "lossless"):
-        print(f"\nSanitizing all images, mode={mode}")
-        response = client.post("/api/sanitize", json={"all": True, "mode": mode}, headers=HEADERS)
+    runs = [("reencode", "jpeg"), ("reencode", "heic"), ("lossless", "jpeg")]
+    for mode, heic_output in runs:
+        print(f"\nSanitizing all images, mode={mode}, heic_output={heic_output}")
+        response = client.post("/api/sanitize", json={"all": True, "mode": mode, "heic_output": heic_output},
+                               headers=HEADERS)
         if response.status_code != 200:
             print("  FAILED:", response.get_json())
             failures += 1
@@ -74,7 +76,7 @@ def main():
                 failures += 1
                 continue
             status = "CLEAN" if s["verified_clean"] else "NOT CLEAN"
-            print(f"  {status:<9} {result['filename']:<32} tags {s['before_tag_count']:>3} -> "
+            print(f"  {status:<9} {result['filename']:<32} {s['output_format']:<5} tags {s['before_tag_count']:>3} -> "
                   f"{s['after_tag_count']:<3} removed={len(s['removed_tags']):<3} "
                   f"image_check={s['image_check']['message']}")
             if not s["verified_clean"]:
