@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Photo Tool – OSINT Metadata Workspace</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<!-- =====================================================================
+     HEADER
+     ===================================================================== -->
+<header class="app-header">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">◎</div>
+    <div>
+      <h1>Photo Tool</h1>
+      <p class="tagline">Batch photo metadata analysis for <strong>OSINT</strong>, with one-click sanitization for <strong>OPSEC</strong>.</p>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="privacy-note" title="Uploaded images, thumbnails, metadata, filenames and GPS coordinates never leave this machine.">
+      🔒 All image processing happens <strong>locally</strong> on this machine. Nothing is sent to external APIs or AI services.
+      Only OpenStreetMap map tiles are downloaded (can be switched off on the map).
+    </div>
+    <div class="header-status">
+      {% if exiftool_version %}
+        <span class="pill pill-ok">ExifTool {{ exiftool_version }}</span>
+      {% else %}
+        <span class="pill pill-bad">ExifTool NOT found</span>
+      {% endif %}
+      <button id="btn-clear-workspace" class="btn btn-ghost btn-small" type="button">Clear workspace</button>
+    </div>
+  </div>
+</header>
+
+{% if not exiftool_version %}
+<div class="banner banner-error">
+  ExifTool is not installed or not on PATH. Metadata extraction and verification will fail.
+  Install it with <code>sudo apt install libimage-exiftool-perl</code> and restart the server.
+</div>
+{% endif %}
+
+<main class="app-main">
+
+  <!-- ===================================================================
+       1. UPLOAD
+       =================================================================== -->
+  <section class="card" id="upload-section">
+    <div class="card-title-row">
+      <h2><span class="step">1</span> Upload images</h2>
+      <span class="muted small">Formats: {{ allowed_extensions | join(', ') }} · max {{ max_file_mb }} MB per file · max {{ max_images }} images</span>
+    </div>
+    <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop images or folders here">
+      <div class="drop-icon" aria-hidden="true">⇪</div>
+      <div><strong>Drag &amp; drop images or whole folders here</strong></div>
+      <div class="muted">or</div>
+      <div class="drop-buttons">
+        <button id="btn-pick-files" class="btn btn-primary" type="button">Select images…</button>
+        <button id="btn-pick-folder" class="btn" type="button">Select folder…</button>
+      </div>
+      <input id="input-files" type="file" multiple accept=".jpg,.jpeg,.jpe,.png,.webp,.tif,.tiff,image/jpeg,image/png,image/webp,image/tiff" hidden>
+      <input id="input-folder" type="file" multiple webkitdirectory hidden>
+    </div>
+    <div id="upload-progress" class="upload-progress hidden">
+      <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill"></div></div>
+      <div id="upload-progress-text" class="small"></div>
+    </div>
+    <details id="upload-errors" class="upload-errors hidden">
+      <summary id="upload-errors-summary"></summary>
+      <ul id="upload-errors-list"></ul>
+    </details>
+  </section>
+
+  <!-- ===================================================================
+       2. BATCH SUMMARY
+       =================================================================== -->
+  <section class="card hidden" id="summary-section">
+    <div class="card-title-row">
+      <h2><span class="step">2</span> Batch summary</h2>
+      <span class="muted small">Click a card to filter the workspace</span>
+    </div>
+    <div id="stats-grid" class="stats-grid"></div>
+  </section>
+
+  <!-- ===================================================================
+       3. THUMBNAIL GALLERY
+       =================================================================== -->
+  <section class="card hidden" id="gallery-section">
+    <div class="card-title-row">
+      <h2><span class="step">3</span> Thumbnail overview</h2>
+      <div class="gallery-toolbar">
+        <button id="btn-all-images" class="btn btn-all active" type="button">▦ All Images</button>
+        <span id="gallery-count" class="muted small"></span>
+        <button id="btn-check-visible" class="btn btn-small" type="button" title="Tick every visible image">Tick visible</button>
+        <button id="btn-uncheck-all" class="btn btn-small" type="button">Untick all</button>
+        <span id="checked-count" class="pill"></span>
+        <label class="small muted"><input type="checkbox" id="toggle-gallery-expand"> expand</label>
+      </div>
+    </div>
+    <div class="legend small muted">
+      Badges: <span class="badge b-gps">GPS</span> location
+      <span class="badge b-time">TIME</span> timestamp
+      <span class="badge b-dev">DEV</span> camera/device
+      <span class="badge b-sw">SW</span> software/editor
+      <span class="badge b-auth">AUTH</span> author/copyright
+      <span class="badge b-id">ID</span> serial/unique ID
+      <span class="badge b-emb">THUMB</span> embedded thumbnail
+      <span class="badge b-clean">✔ CLEAN</span> verified sanitized
+      · Keys: <kbd>←</kbd>/<kbd>→</kbd> previous/next, <kbd>Esc</kbd> All Images
+    </div>
+    <div id="gallery" class="gallery"></div>
+  </section>
+
+  <!-- ===================================================================
+       OPSEC ACTION BAR (sanitize + download)
+       =================================================================== -->
+  <section class="card action-bar hidden" id="action-section">
+    <div class="action-group">
+      <strong>OPSEC · Sanitize</strong>
+      <label class="small">Mode
+        <select id="sanitize-mode">
+          <option value="reencode" selected>Re-encode from pixels (max removal)</option>
+          <option value="lossless">Lossless strip via ExifTool (exact pixels)</option>
+        </select>
+      </label>
+      <label class="small" title="Keeps colour accuracy for wide-gamut photos. The ICC profile can reveal device vendor / profile dates.">
+        <input type="checkbox" id="keep-icc"> keep ICC colour profile
+      </label>
+      <button id="btn-sanitize-selected" class="btn" type="button" disabled>Sanitize selected image</button>
+      <button id="btn-sanitize-checked" class="btn" type="button" disabled>Sanitize ticked (0)</button>
+      <button id="btn-sanitize-all" class="btn btn-warn" type="button">Sanitize ALL</button>
+    </div>
+    <div class="action-group">
+      <strong>Download</strong>
+      <button id="btn-download-selected" class="btn" type="button" disabled>Selected sanitized copy</button>
+      <button id="btn-zip-checked" class="btn" type="button" disabled>Ticked as ZIP</button>
+      <button id="btn-zip-all" class="btn btn-primary" type="button" disabled>All sanitized as ZIP</button>
+    </div>
+    <div id="action-status" class="action-status small"></div>
+  </section>
+
+  <!-- ===================================================================
+       WORKSPACE: left = filters/table/map/correlation, right = inspector
+       =================================================================== -->
+  <div class="workspace hidden" id="workspace">
+    <div class="workspace-left">
+
+      <!-- 4. FILTERS + TABLE -->
+      <section class="card" id="table-section">
+        <div class="card-title-row">
+          <h2><span class="step">4</span> Metadata table</h2>
+          <span id="table-count" class="muted small"></span>
+        </div>
+        <div class="filters">
+          <input id="filter-search" type="search" placeholder="Search filename, device, software, date, author…" autocomplete="off">
+          <label><input type="checkbox" data-filter="gps"> Has GPS</label>
+          <label><input type="checkbox" data-filter="timestamp"> Has timestamp</label>
+          <label><input type="checkbox" data-filter="device"> Has device</label>
+          <label><input type="checkbox" data-filter="software"> Has software</label>
+          <label><input type="checkbox" data-filter="author"> Has author</label>
+          <label><input type="checkbox" data-filter="unsanitized"> Not yet sanitized</label>
+          <span id="group-filter-chip" class="chip hidden"></span>
+          <button id="btn-clear-filters" class="btn btn-small btn-ghost" type="button">Clear filters</button>
+        </div>
+        <div class="table-wrap" id="table-wrap">
+          <table class="meta-table" id="meta-table">
+            <thead>
+              <tr>
+                <th class="col-check"><input type="checkbox" id="table-check-all" title="Tick / untick all visible"></th>
+                <th class="col-thumb"></th>
+                <th data-sort="filename">Filename</th>
+                <th data-sort="timestamp">Timestamp</th>
+                <th data-sort="device">Device / camera</th>
+                <th data-sort="software">Software</th>
+                <th data-sort="gps">GPS</th>
+                <th data-sort="pixels">Dimensions</th>
+                <th data-sort="size">Size</th>
+                <th data-sort="sensitivity">Exposure</th>
+                <th data-sort="sanitized">Sanitized</th>
+              </tr>
+            </thead>
+            <tbody id="meta-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 5. MAP + CORRELATION -->
+      <div class="map-correlation">
+        <section class="card" id="map-section">
+          <div class="card-title-row">
+            <h2><span class="step">5</span> GPS map</h2>
+            <div class="map-toolbar small">
+              <button id="btn-map-fit" class="btn btn-small" type="button">Fit all</button>
+              <label title="Connect GPS points of each device in chronological order"><input type="checkbox" id="toggle-map-path"> chronological path</label>
+              <label title="Map tiles are loaded from tile.openstreetmap.org. The tile server can infer which area you are looking at."><input type="checkbox" id="toggle-map-tiles" checked> online map tiles</label>
+            </div>
+          </div>
+          <div class="map-container">
+            <div id="map"></div>
+            <div id="map-empty" class="map-empty hidden">No GPS metadata found in this batch.</div>
+          </div>
+          <div id="map-note" class="small muted"></div>
+        </section>
+
+        <section class="card" id="correlation-section">
+          <div class="card-title-row">
+            <h2><span class="step">6</span> Correlation</h2>
+            <span class="muted small">Click a value to filter</span>
+          </div>
+          <div id="correlation" class="correlation"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- 7. INSPECTOR (detail panel) -->
+    <aside class="workspace-right">
+      <section class="card inspector" id="inspector"></section>
+    </aside>
+  </div>
+</main>
+
+<footer class="app-footer small muted">
+  Photo Tool · local hackathon prototype · originals are never modified · map data © OpenStreetMap contributors
+</footer>
+
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+<script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
