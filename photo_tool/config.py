@@ -52,7 +52,12 @@ ALLOWED_EXTENSIONS = {
     "webp": {"WEBP"},
     "tif": {"TIFF"},
     "tiff": {"TIFF"},
+    # HEIC/HEIF (iPhone photos) - only if pillow-heif is installed,
+    # otherwise heif_support.py removes these two entries at startup.
+    "heic": {"HEIF"},
+    "heif": {"HEIF"},
 }
+HEIF_EXTENSIONS = ("heic", "heif")
 
 # Pillow format -> (canonical extension, MIME type) used for stored copies.
 # MPO is a JPEG with extra embedded pictures (common for phones/3D cameras).
@@ -62,6 +67,7 @@ FORMAT_INFO = {
     "PNG": ("png", "image/png"),
     "WEBP": ("webp", "image/webp"),
     "TIFF": ("tif", "image/tiff"),
+    "HEIF": ("heic", "image/heic"),    # Pillow reports HEIC and HEIF as "HEIF"
 }
 
 # --- Derived images ----------------------------------------------------------------
@@ -73,6 +79,14 @@ PREVIEW_QUALITY = 85
 # --- Sanitization --------------------------------------------------------------------
 JPEG_SANITIZE_QUALITY = 95     # re-encode quality for JPEG output
 WEBP_SANITIZE_QUALITY = 95     # re-encode quality for lossy WebP output
+HEIF_SANITIZE_QUALITY = 90     # re-encode quality when HEIC output stays HEIC
+
+# What a sanitized HEIC becomes in "reencode" mode:
+#   "jpeg" - converted to JPEG (works everywhere: websites, Windows, Android)
+#   "heic" - stays HEIC (smaller, but many programs cannot open it)
+# In "lossless" mode a HEIC always stays HEIC (metadata stripped by ExifTool).
+HEIC_OUTPUT_CHOICES = ("jpeg", "heic")
+DEFAULT_HEIC_OUTPUT = "jpeg"
 
 # --- ExifTool ----------------------------------------------------------------------
 EXIFTOOL_BINARY = os.environ.get("PHOTO_TOOL_EXIFTOOL", "exiftool")

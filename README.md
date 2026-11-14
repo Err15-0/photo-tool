@@ -12,6 +12,8 @@ You can drop a folder of photos into the browser and then:
 * sanitize one, several or all photos. Each sanitized copy is **re-read with ExifTool** and compared with the original.
 * download clean copies one at a time or as a ZIP
 
+Supported formats: **JPEG, PNG, WebP, TIFF and HEIC/HEIF (iPhone photos)**.
+
 Everything runs **locally**. Images, thumbnails, metadata, filenames and GPS coordinates are never sent to an external API or AI service. The only outside requests are OpenStreetMap map tiles, and you can switch those off on the map.
 
 ---
@@ -86,6 +88,7 @@ Each map marker stores its image ID (`marker.imageId`), and `mapState.markers` m
 ### How sanitization works (`photo_tool/sanitize.py`)
 | Mode | What happens | Pixels |
 |---|---|---|
+| **HEIC input** | In re-encode mode the output is **JPEG by default** (the "HEIC →" option), because many websites and Windows/Android programs cannot open HEIC. You can choose "keep HEIC" instead. Lossless mode always keeps HEIC. Depth maps, auxiliary images, embedded thumbnails and the Live Photo link are dropped when re-encoding. | JPEG q95 / HEIC q90 |
 | **Re-encode** (default) | Pillow decodes the image, bakes the EXIF rotation into the pixels and writes a **brand-new file** from pixel data only. EXIF, XMP, IPTC, maker notes, embedded thumbnails, MPF images, PNG text chunks and trailers cannot survive because nothing is copied from the original. | PNG/TIFF identical; JPEG/WebP re-compressed at quality 95 |
 | **Lossless** | `exiftool -all= -trailer:all=` plus explicit deletion of the IFD0 text tags. Only `Orientation` is copied back so the photo isn't shown rotated. | bit-identical |
 
@@ -113,14 +116,14 @@ The directory is deleted when the server exits (`atexit`), and also when you cli
 
 ### Dependencies
 * **System:** Python 3.9 or newer, `python3-venv`, ExifTool (`libimage-exiftool-perl`)
-* **Python:** Flask and Pillow (`requirements.txt`). Pillow wheels already include libjpeg, libpng, libwebp and libtiff, so no `-dev` packages are needed.
+* **Python:** Flask, Pillow and pillow-heif (`requirements.txt`). Pillow wheels already include libjpeg, libpng, libwebp and libtiff, and pillow-heif wheels include libheif, so no `-dev` packages are needed.
 * **Frontend:** Leaflet 1.9.4, **bundled** in `static/vendor/leaflet/` (no CDN). No npm and no build step.
 
 ### Debian-specific notes
 * Debian 12+ blocks `pip install` into the system Python (PEP 668, "externally-managed-environment"). **Use the virtual environment** shown below.
 * `python3 -m venv` needs the separate `python3-venv` package.
 * The Debian package for ExifTool is called **`libimage-exiftool-perl`**, not `exiftool`.
-* HEIC/HEIF is **not supported**; it would need `pillow-heif` and libheif. Convert HEIC to JPEG first, or export as JPEG from the phone.
+* HEIC/HEIF support comes from the pip package `pillow-heif`, which bundles libheif, so it needs no apt package on normal x86_64/arm64 machines. If pip cannot find a pre-built wheel for your machine, install `libheif-dev` with apt and retry. If pillow-heif is missing, the app still runs: the header shows "HEIC off" and `.heic` files are rejected with a hint.
 
 ---
 
@@ -138,7 +141,8 @@ photo-tool/
 │   ├── uploads.py             validation, safe storage, thumbnails/previews
 │   ├── metadata.py            ExifTool runner, normalization, GPS, sensitivity rules
 │   ├── sanitize.py            sanitization (2 modes) + verification/comparison
-│   └── downloads.py           safe download names, ZIP building
+│   ├── downloads.py           safe download names, ZIP building
+│   └── heif_support.py        enables HEIC/HEIF via pillow-heif (optional)
 ├── templates/
 │   └── index.html             single page layout
 ├── static/
@@ -248,6 +252,7 @@ Extra checks:
 * `17_gps_zero_zero.jpg` has a "GPS?" badge, a warning, and no marker.
 * `18_png_named_as.jpg` shows an "extension mismatch" warning.
 * Lossless mode on `14_tiff_with_artist.tif` comes out verified clean.
+* **HEIC:** `19_iphone_new_york.heic` and `20_iphone_statue.heif` show thumbnails, GPS markers in New York and Apple device info. Sanitize with "HEIC → JPEG": the download is `..._sanitized.jpg` and the before/after panel shows `Format HEIC → JPEG`. Choose "keep HEIC" and sanitize again: the download is `..._sanitized.heic`, also verified clean.
 * Untick **online map tiles**: no more requests go to OpenStreetMap, and the markers stay.
 * Use ← / → to step through images and Esc to go back to All Images.
 
@@ -288,6 +293,7 @@ mkdir -p /tmp/check && unzip -o ~/Downloads/sanitized_images.zip -d /tmp/check &
 | `error: externally-managed-environment` | pip into system Python | Activate `.venv` first (section 3) |
 | All uploads fail with "Missing X-Photo-Tool header" | Old cached JS | Hard refresh (Ctrl+Shift+R). Header check is in `app.py → security_checks()` |
 | "Unexpected Host header" | Opened via a LAN IP / custom hostname | Use `127.0.0.1`, or set `PHOTO_TOOL_ALLOWED_HOSTS` |
+| `.heic` rejected / header shows "HEIC off" | pillow-heif not installed in the venv | `pip install -r requirements.txt` in the activated venv, restart; `photo_tool/heif_support.py` |
 | A file is rejected that you think is valid | Validation | Server log line `Rejected <name>: <reason>`; `uploads.py → _detect_and_verify()` / `_create_derivatives()` |
 | "Request too large" (413) | File > limit | `PHOTO_TOOL_MAX_FILE_MB`; `config.py` |
 | A field shows `-` but ExifTool shows a value | Tag name not in the lookup list | `metadata.py → normalize_metadata()` (add the tag name to the list for that field) |
@@ -321,7 +327,8 @@ Server logs go to the terminal. Start with `PHOTO_TOOL_DEBUG=1` to also see Exif
 ## 9. Known limitations
 
 * **JPEG/WebP re-encode mode is lossy** (quality 95). Use **Lossless** mode when pixels must be bit-identical.
-* **HEIC/HEIF and RAW** formats are not supported.
+* **RAW** formats (CR2, NEF, DNG...) are not supported.
+* **HEIC:** a few rare HEIC variants (image sequences, some 10-bit HDR files) are decoded to 8-bit; the default JPEG output is 8-bit anyway. In lossless mode the EXIF Orientation tag of a HEIC is kept, but it is informational only: HEIC rotation lives in the container and is preserved.
 * **Animated WebP / multi-page TIFF:** thumbnails show the first frame. Sanitizing switches to lossless mode automatically so no frames are lost.
 * **MPO** (multi-picture JPEG): re-encode keeps only the main picture, which is intentional because the extra pictures are metadata-like.
 * **Not covered:** content *inside* the pixels (faces, street signs, screens), steganography and sensor fingerprints (PRNU). Metadata sanitizing does not make a photo anonymous.
