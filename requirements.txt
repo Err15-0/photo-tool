@@ -1,3 +1,4 @@
 # Python dependencies (install inside a virtual environment, see README.md)
 Flask>=3.0,<4
 Pillow>=10.1
+pillow-heif>=0.18

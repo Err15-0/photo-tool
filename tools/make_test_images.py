@@ -21,6 +21,7 @@ The batch covers the manual test checklist in README.md:
   - JPEG with an embedded EXIF thumbnail (classic OPSEC leak)
   - JPEG with bogus 0,0 GPS
   - PNG file misnamed as .jpg
+  - HEIC "iPhone" photos with GPS (only if pillow-heif is installed)
 """
 
 import os
@@ -32,6 +33,14 @@ from PIL import Image, ImageDraw, ImageFont
 
 OUTPUT = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "sample_images")
 EXIFTOOL = shutil.which("exiftool")
+
+try:
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+    HEIF_AVAILABLE = True
+except ImportError:
+    HEIF_AVAILABLE = False
 
 
 def font(size):
@@ -164,6 +173,19 @@ def main():
 
     # 18. PNG content with a .jpg name
     make_picture(out("18_png_named_as.jpg"), "PNG named .jpg", (10, 160, 160), fmt="PNG")
+
+    # 19-20. HEIC (iPhone) photos with GPS, lens and host computer
+    if HEIF_AVAILABLE:
+        p = make_picture(out("19_iphone_new_york.heic"), "HEIC New York", (60, 60, 160), size=(1008, 756), fmt="HEIF")
+        exiftool(p, "-Make=Apple", "-Model=iPhone 15 Pro", "-Software=17.4.1", "-HostComputer=iPhone 15 Pro",
+                 "-LensModel=iPhone 15 Pro back triple camera 6.765mm f/1.78",
+                 "-DateTimeOriginal=2024:07:04 21:15:30", "-CreateDate=2024:07:04 21:15:30",
+                 "-OffsetTimeOriginal=-04:00", *gps_tags(40.6892, -74.0445, 12.0))
+        p = make_picture(out("20_iphone_statue.heif"), "HEIF (.heif)", (90, 30, 120), size=(1008, 756), fmt="HEIF")
+        exiftool(p, "-Make=Apple", "-Model=iPhone 15 Pro", "-Software=17.4.1",
+                 "-DateTimeOriginal=2024:07:05 09:02:11", *gps_tags(40.7484, -73.9857, 20.0))
+    else:
+        print("pillow-heif not installed: skipping HEIC samples (pip install pillow-heif)")
 
     print(f"Sample images written to {OUTPUT}")
     for root, _dirs, files in os.walk(OUTPUT):

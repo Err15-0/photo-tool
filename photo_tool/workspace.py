@@ -130,6 +130,7 @@ def _sanitization_summary(sanitization):
         "mode": sanitization.get("mode"),
         "verified_clean": sanitization.get("verified_clean"),
         "download_name": sanitization.get("download_name"),
+        "output_format": sanitization.get("output_format"),
         "remaining_sensitive_count": sanitization.get("remaining_sensitive_count"),
         "error": sanitization.get("error"),
     }
