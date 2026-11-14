@@ -31,7 +31,9 @@
 // --------------------------------------------------------------------------
 const UPLOAD_CHUNK_FILES = 10;                    // files per upload request
 const UPLOAD_CHUNK_BYTES = 150 * 1024 * 1024;     // ...or this many bytes
-const ALLOWED_EXTENSIONS = ["jpg", "jpeg", "jpe", "png", "webp", "tif", "tiff"];
+// Replaced at start-up with the server's list (/api/status), which includes
+// heic/heif only when pillow-heif is installed.
+let ALLOWED_EXTENSIONS = ["jpg", "jpeg", "jpe", "png", "webp", "tif", "tiff", "heic", "heif"];
 const OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
 
 // Same ids/labels as SENSITIVE_CATEGORIES in photo_tool/metadata.py
@@ -1021,6 +1023,7 @@ function buildVerification(detail) {
 
   nodes.push(h("table", { class: "kv" }, h("tbody", null,
     h("tr", null, h("th", null, "Mode"), h("td", null, s.mode === "reencode" ? "Re-encode from pixels" : "Lossless ExifTool strip")),
+    h("tr", null, h("th", null, "Format"), h("td", null, `${detail.format === "HEIF" ? "HEIC" : detail.format} → ${s.output_format === "HEIF" ? "HEIC" : s.output_format}`)),
     h("tr", null, h("th", null, "Metadata tags"), h("td", null, `${s.before_tag_count} → ${s.after_tag_count} (${s.removed_tags.length} removed)`)),
     h("tr", null, h("th", null, "File size"), h("td", null, `${formatBytes(detail.file_size)} → ${formatBytes(s.file_size)}`)),
     h("tr", null, h("th", null, "Image check"), h("td", null, s.image_check ? s.image_check.message : "-")),
@@ -1149,7 +1152,10 @@ function preValidate(files) {
   for (const file of files) {
     const ext = extensionOf(file.name);
     if (file.name.startsWith(".")) continue;                      // hidden files (.DS_Store …)
-    if (!ALLOWED_EXTENSIONS.includes(ext)) rejected.push({ filename: file.name, error: `Skipped: unsupported extension '.${ext}'` });
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+      const hint = (ext === "heic" || ext === "heif") ? " (HEIC support is off: pip install pillow-heif, then restart)" : "";
+      rejected.push({ filename: file.name, error: `Skipped: unsupported extension '.${ext}'${hint}` });
+    }
     else if (file.size === 0) rejected.push({ filename: file.name, error: "Skipped: file is empty" });
     else if (file.size > maxBytes) rejected.push({ filename: file.name, error: `Skipped: larger than ${Math.round(maxBytes / 1048576)} MB` });
     else accepted.push(file);
@@ -1243,6 +1249,7 @@ async function sanitize(target) {
   const payload = {
     mode: $("sanitize-mode").value,
     keep_icc: $("keep-icc").checked,
+    heic_output: $("heic-output").value,
   };
   let count;
   if (target.all) { payload.all = true; count = state.images.length; } else { payload.ids = target.ids; count = target.ids.length; }
@@ -1414,6 +1421,12 @@ async function init() {
   try {
     const status = await api("/api/status");
     window.PHOTO_TOOL_MAX_FILE_SIZE = status.max_file_size;
+    ALLOWED_EXTENSIONS = status.allowed_extensions;
+    if (!status.heif_available) {
+      const heicSelect = $("heic-output");
+      heicSelect.disabled = true;
+      heicSelect.title = "HEIC support is off: pip install pillow-heif";
+    }
     // Restore the workspace if the page was reloaded while the server kept running.
     const data = await api("/api/images");
     storeImages(data.images);

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from . import config
+from . import heif_support  # noqa: F401  (registers the HEIC/HEIF Pillow plugin)
 from .workspace import ImageRecord, generate_image_id
 
 log = logging.getLogger(__name__)
