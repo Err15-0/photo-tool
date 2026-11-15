@@ -7,7 +7,7 @@ You can drop a folder of photos into the browser and then:
 * see every photo as a thumbnail with badges (GPS, timestamp, device, software, author, serials, embedded thumbnails)
 * look through one table of the metadata (sortable, filterable, searchable)
 * see every GPS-tagged photo on a Leaflet/OpenStreetMap map, and optionally connect each device's photos in time order
-* click a thumbnail, table row or map marker. The thumbnail wall, table, map and detail panel all move to that same image.
+* click a thumbnail, table row or map marker. The thumbnail wall, table, map and Properties dialog all move to that same image.
 * group photos by device, software, lens, capture day or author, and spot identical files and duplicate names
 * sanitize one, several or all photos. Each sanitized copy is **re-read with ExifTool** and compared with the original.
 * download clean copies one at a time or as a ZIP
@@ -30,7 +30,7 @@ drop zone / file picker ─ chunks of 10 ─▶  POST /api/upload
 gallery ◀─┐                                                                     (x2: readable + numeric)
 table   ◀─┼── state (app.js) ◀── JSON ──── GET /api/images, /api/images/<id>
 map     ◀─┤        ▲                         GET /images/<id>/thumb|preview
-inspector◀┘        │
+properties◀┘      │
                    └── selectImage(id)
 "Sanitize" ──────────────────────────────▶ POST /api/sanitize
                                              └─ sanitize.py: write copy ──────▶ Pillow  or  exiftool -all=
@@ -80,10 +80,26 @@ Every click goes through the same function, whether it comes from a thumbnail, a
 selectImage(id, source)
   → state.selectedId = id
   → updateSelectionUI(source)   highlight card + row + marker, scroll the other panels to it, zoom map, open popup
-  → renderInspector()           detail panel (fetches /api/images/<id> once, then cached)
+  → renderProperties()          Properties dialog (fetches /api/images/<id> once, then cached)
+  → renderChrome()              breadcrumb in the address bar + counts in the status bar
 ```
 
 Each map marker stores its image ID (`marker.imageId`), and `mapState.markers` maps ID to marker. Filters work the same way: change `state.filters`, then call `renderAll()`, so the gallery, table and map always show the same set of images.
+
+### User interface (Windows 7–style desktop utility)
+The page is laid out like a Windows 7 application window:
+
+| Area | What it is | Where in the code |
+|---|---|---|
+| Title bar | `_` rolls the window up, `□` maximizes (or double-click the title), `×` clears the workspace (after a confirmation) | `index.html .titlebar` |
+| Menu bar | **File / Analyze / View / Tools / Help** | `index.html .menubar` |
+| Toolbar | **Add Images, Add Folder, Analyze, Sanitize ▾, Export ▾** + the sanitize options (Mode, HEIC →, Keep ICC) | `index.html .toolbar` |
+| Address bar | breadcrumb `Workspace ▸ All Images ▸ file.jpg` (click to go back) + search box | `app.js → renderAddressBar()` |
+| Panes | Add Images, Batch Summary, Thumbnails (Explorer icon view), Details (list view), GPS Locations (map), Correlation (tree) | `index.html .client` |
+| Properties dialog | tabs **General, Metadata, Raw EXIF, Privacy, Sanitize** for one image; **General, Privacy, Sanitize** for All Images | `app.js → renderProperties()` |
+| Status bar | `20 images | 10 GPS | 16 timestamps | …`, the selected image, upload progress, ExifTool/HEIC status, `Ready` | `app.js → renderStatusBar()`, `setActionStatus()` |
+
+Every menu item, toolbar button and caption button has a `data-command="..."` attribute. The `COMMANDS` table in `app.js` defines what each command does (`run`), when it is greyed out (`enabled`) and when a menu item shows a check mark (`checked`). Option commands such as "Mode: Lossless" only change the real form control (`#sanitize-mode`, `#heic-output`, `#keep-icc`, the map checkboxes). That control stays the single source of truth for the setting.
 
 ### How sanitization works (`photo_tool/sanitize.py`)
 | Mode | What happens | Pixels |
@@ -123,7 +139,7 @@ The directory is deleted when the server exits (`atexit`), and also when you cli
 * Debian 12+ blocks `pip install` into the system Python (PEP 668, "externally-managed-environment"). **Use the virtual environment** shown below.
 * `python3 -m venv` needs the separate `python3-venv` package.
 * The Debian package for ExifTool is called **`libimage-exiftool-perl`**, not `exiftool`.
-* HEIC/HEIF support comes from the pip package `pillow-heif`, which bundles libheif, so it needs no apt package on normal x86_64/arm64 machines. If pip cannot find a pre-built wheel for your machine, install `libheif-dev` with apt and retry. If pillow-heif is missing, the app still runs: the header shows "HEIC off" and `.heic` files are rejected with a hint.
+* HEIC/HEIF support comes from the pip package `pillow-heif`, which bundles libheif, so it needs no apt package on normal x86_64/arm64 machines. If pip cannot find a pre-built wheel for your machine, install `libheif-dev` with apt and retry. If pillow-heif is missing, the app still runs: the status bar shows "HEIC off" and `.heic` files are rejected with a hint.
 
 ---
 
@@ -234,27 +250,29 @@ Use `sample_images/` (file names below) or your own photos.
 |---|---|---|---|
 | 1 | JPEG with EXIF, no GPS | Upload `01_exif_no_gps.jpg` | Badges TIME, DEV, SW, AUTH, ID. Table shows the Canon device, timestamp and `-` for GPS. Map says *"No GPS metadata found in this batch."* |
 | 2 | JPEG with GPS | Upload `02_gps_phoenix_morning.jpg` | GPS badge, coordinates in the table, marker near Phoenix, popup with thumbnail, filename, lat/lon, time and device |
-| 3 | Many at once | Drag the whole `sample_images` folder | 18 thumbnails, 2 rejected files listed, stats filled in, map fits all markers |
+| 3 | Many at once | Drag the whole `sample_images` folder anywhere into the window | 20 thumbnails (18 without pillow-heif), 2 rejected files listed, Batch Summary and status bar filled in, map fits all markers |
 | 4 | Duplicate filenames | `folder_a/photo.jpg` and `folder_b/photo.jpg` | Two separate cards marked "same name". The byte-identical copy is marked "identical ×2". Each has its own ID and metadata. Correlation lists them. |
 | 5 | No EXIF | `08_no_metadata.png` | Badge "none", all fields `-`, no errors |
 | 6 | Corrupted / fake | `10_corrupted_truncated.jpg`, `11_not_an_image.jpg` | Both listed under "rejected" with a reason. The rest of the batch is fine. |
-| 7 | Thumbnail sync | Click a GPS thumbnail | Card outlined, table row highlighted and scrolled into view, detail panel shows preview + metadata, map zooms to the marker with its popup open |
-| 8 | Table sync | Click a table row | Same as 7, and the gallery scrolls to the card |
-| 9 | Map sync | Click **All Images**, then click a marker | Card, row and detail panel all switch to that image |
-| 10 | Sanitize one | Select an image → **Sanitize image** | Green "Verified" banner. Table shows Original → Sanitized → **Removed** for GPS, timestamps and device. Lists of remaining and removed tags. Thumbnail gets ✔ CLEAN. |
+| 7 | Thumbnail sync | Click a GPS thumbnail | Pale-blue selection on the thumbnail, Details row highlighted and scrolled into view, Properties dialog shows the image, map zooms to the marker with its popup open, breadcrumb and status bar show the file name |
+| 8 | Table sync | Click a row in Details | Same as 7, and the Thumbnails pane scrolls to the card |
+| 9 | Map sync | Click **All Images** (or press Esc), then click a marker in GPS Locations | Thumbnail, row and Properties dialog all switch to that image |
+| 10 | Sanitize one | Select an image → toolbar **Sanitize ▾ → Sanitize Selected Image** (or the **Sanitize Image** button in Properties) | Properties switches to the **Sanitize** tab: green "Verified clean" shield, an **Original Metadata → Sanitized Metadata** table with a green ✓ **Removed** for GPS, timestamps and device, plus lists of remaining and removed tags. The thumbnail gets ✔ CLEAN. |
 | 11 | Manual ExifTool check | Download the sanitized copy, then run the commands in section 6 | No GPS, Make, Model, dates, Software or Artist tags |
-| 12 | Several + ZIP | Tick 3 images → **Sanitize ticked** → **Ticked as ZIP** | `sanitized_images.zip` with `name_sanitized.ext` files. Duplicate names become `photo_sanitized.jpg` and `photo_sanitized_2.jpg`. |
+| 12 | Several + ZIP | Tick 3 images → **Sanitize ▾ → Sanitize Ticked Images (3)** → **Export ▾ → Ticked Sanitized Images as ZIP** | `sanitized_images.zip` with `name_sanitized.ext` files. Duplicate names become `photo_sanitized.jpg` and `photo_sanitized_2.jpg`. |
 
 Extra checks:
-* Filters, search, stat cards and correlation values all filter the gallery, table and map together. **All Images** resets everything.
+* Filters (Details pane or **Analyze** menu), the search box, Batch Summary tiles and Correlation values all filter the thumbnails, table and map together. **All Images** / Esc resets everything.
+* Menus: check marks in **Analyze**, **View** and **Tools** follow the real settings. Items are greyed out when they can't be used (e.g. **Export** before anything is sanitized).
+* Keyboard: Ctrl+O add images, Ctrl+S save the selected sanitized copy, F1 shortcuts, ← / → previous/next, Esc All Images.
 * `12_rotated_orientation6.jpg` displays upright, and the sanitized copy is upright too (in re-encode mode the rotation is baked in).
 * `16_embedded_thumbnail.jpg` gets a THUMB badge, and the embedded thumbnail is gone after sanitizing.
 * `17_gps_zero_zero.jpg` has a "GPS?" badge, a warning, and no marker.
 * `18_png_named_as.jpg` shows an "extension mismatch" warning.
 * Lossless mode on `14_tiff_with_artist.tif` comes out verified clean.
 * **HEIC:** `19_iphone_new_york.heic` and `20_iphone_statue.heif` show thumbnails, GPS markers in New York and Apple device info. Sanitize with "HEIC → JPEG": the download is `..._sanitized.jpg` and the before/after panel shows `Format HEIC → JPEG`. Choose "keep HEIC" and sanitize again: the download is `..._sanitized.heic`, also verified clean.
-* Untick **online map tiles**: no more requests go to OpenStreetMap, and the markers stay.
-* Use ← / → to step through images and Esc to go back to All Images.
+* Untick **Online tiles** (GPS Locations pane, or View → Online Map Tiles): no more requests go to OpenStreetMap, and the markers stay.
+* On a phone-width window the toolbar shows icons only, panes stack vertically and selecting an image scrolls to its Properties.
 
 ---
 
@@ -293,15 +311,16 @@ mkdir -p /tmp/check && unzip -o ~/Downloads/sanitized_images.zip -d /tmp/check &
 | `error: externally-managed-environment` | pip into system Python | Activate `.venv` first (section 3) |
 | All uploads fail with "Missing X-Photo-Tool header" | Old cached JS | Hard refresh (Ctrl+Shift+R). Header check is in `app.py → security_checks()` |
 | "Unexpected Host header" | Opened via a LAN IP / custom hostname | Use `127.0.0.1`, or set `PHOTO_TOOL_ALLOWED_HOSTS` |
-| `.heic` rejected / header shows "HEIC off" | pillow-heif not installed in the venv | `pip install -r requirements.txt` in the activated venv, restart; `photo_tool/heif_support.py` |
+| `.heic` rejected / status bar shows "HEIC off" | pillow-heif not installed in the venv | `pip install -r requirements.txt` in the activated venv, restart; `photo_tool/heif_support.py` |
 | A file is rejected that you think is valid | Validation | Server log line `Rejected <name>: <reason>`; `uploads.py → _detect_and_verify()` / `_create_derivatives()` |
 | "Request too large" (413) | File > limit | `PHOTO_TOOL_MAX_FILE_MB`; `config.py` |
 | A field shows `-` but ExifTool shows a value | Tag name not in the lookup list | `metadata.py → normalize_metadata()` (add the tag name to the list for that field) |
 | Badge/category wrong or missing | Classification rules | `metadata.py → classify_tag()` and the regex/sets above it |
-| GPS not on the map | `gps_status` is zero/invalid/incomplete | Detail panel warnings; `metadata.py → extract_gps()` |
+| GPS not on the map | `gps_status` is zero/invalid/incomplete | Warnings on the Properties → General tab; `metadata.py → extract_gps()` |
 | Map is grey | Tiles blocked, offline, or toggle off | Browser devtools Network tab; `app.js → setTilesEnabled()`; CSP `img-src` in `app.py` |
 | Map is the wrong size / half drawn | Leaflet measured a hidden container | `app.js → ensureMap()` (`invalidateSize`) |
 | Clicking X does not update Y | Selection sync | `app.js → selectImage()` / `updateSelectionUI()` |
+| A menu item does nothing / is always grey | Command table | `app.js → COMMANDS` (`run` / `enabled`) and the `data-command` name in `index.html` |
 | Filters behave oddly | Filter logic | `app.js → passesFilters()` / `FLAG_FILTERS` |
 | Sanitized copy "NOT CLEAN" | A tag survived (e.g. a new vendor format in lossless mode) | Try re-encode mode; `sanitize.py → _sanitize_with_exiftool()` |
 | Sanitized JPEG looks rotated | Orientation handling | `sanitize.py → _sanitize_by_reencoding()` (`exif_transpose`) |
