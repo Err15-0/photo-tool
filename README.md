@@ -1,12 +1,49 @@
 # Photo Tool
 
-**Batch photo metadata analysis for OSINT, with one-click metadata sanitization for OPSEC.**
+**A batch-first photo metadata investigation and sanitization workspace.**
 
 <img width="2877" height="1484" alt="image" src="https://github.com/user-attachments/assets/4b2ee2f3-ed25-4e0c-8fb9-1f075c37d233" />
 <img width="2877" height="1488" alt="image" src="https://github.com/user-attachments/assets/0e2cb711-e2ea-48da-af2b-2dabd91d8bed" />
 
 
+## Why I built this
+Photo Tool started with a problem I kept running into during OSINT: when I have a collection of original image files, I don't want to run ExifTool on every photo individually and manually correlate the results.
+Instead, I wanted to drop an entire folder into one place and immediately answer questions like:
+Which photos contain GPS coordinates?
+Where were they taken?
+Which images came from the same device?
+When were they captured?
+Which software touched them?
+Are there patterns or inconsistencies across the collection?
+Which images are worth investigating further?
 
+## Investigation and OPSEC
+Photo Tool turns a collection of original or near-original images into a visual investigation workspace. It combines a thumbnail overview, searchable metadata table, GPS mapping, and metadata correlation so you can move quickly from a large batch to individual images of interest.
+
+The same metadata that can be valuable during an investigation can become a privacy risk when the images are yours.
+A photo may contain precise GPS coordinates, capture times, device information, software history, author fields, serial identifiers, embedded thumbnails, and other information that you may not intend to share.
+
+Photo Tool therefore works in both directions:
+Investigation: What can I learn from this collection of images?
+OPSEC: What could someone else learn from mine?
+
+Before an original image leaves your control, Photo Tool can sanitize its metadata and then re-analyze the output with ExifTool to verify what was actually removed.
+
+
+## Scope
+Photo Tool is designed primarily for original or near-original image collections: device exports, archives, file shares, investigation datasets, email/file attachments, and personal photo libraries.
+Many social media and messaging platforms re-encode uploaded images and strip much of their original metadata. Photo Tool cannot recover metadata that is no longer present, and it is not intended to do so.
+Instead, its goal is to make metadata-rich image collections faster to investigate—and to help users remove that same information before sharing original files.
+
+
+## Why batch analysis matters
+INTERPOL's *Global Guidelines for Digital Forensics Laboratories* notes
+that some exhibits may contain thousands of photos and videos, recommends
+thumbnail/gallery-based review for efficient media triage, and highlights
+GPS coordinates, timestamps, and capture-device information as useful
+image metadata for forensic analysis. (See p. 45, §5.2.3(C), “Pictures and Videos.”)
+
+## Features
 You can drop a folder of photos into the browser and then:
 
 * see every photo as a thumbnail with badges (GPS, timestamp, device, software, author, serials, embedded thumbnails)
