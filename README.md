@@ -2,6 +2,11 @@
 
 **Batch photo metadata analysis for OSINT, with one-click metadata sanitization for OPSEC.**
 
+<img width="2877" height="1484" alt="image" src="https://github.com/user-attachments/assets/4b2ee2f3-ed25-4e0c-8fb9-1f075c37d233" />
+<img width="2877" height="1488" alt="image" src="https://github.com/user-attachments/assets/0e2cb711-e2ea-48da-af2b-2dabd91d8bed" />
+
+
+
 You can drop a folder of photos into the browser and then:
 
 * see every photo as a thumbnail with badges (GPS, timestamp, device, software, author, serials, embedded thumbnails)
@@ -357,4 +362,6 @@ Server logs go to the terminal. Start with `PHOTO_TOOL_DEBUG=1` to also see Exif
 
 ## AI Usage
 
-Claude was used extensively to implement the application.
+## AI Usage
+
+Claude was used extensively for implementation and debugging. I defined the project idea, OSINT/OPSEC workflow, feature requirements, interaction design, security requirements, and testing criteria, then used Claude to implement and iterate on them. I manually tested the application and independently verified metadata sanitization with ExifTool.
