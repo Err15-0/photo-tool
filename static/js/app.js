@@ -16,7 +16,7 @@
          updateSelectionUI(source)      <- highlights thumb + row + marker,
                  │                         scrolls them into view, moves map
                  ▼
-         renderInspector()              <- detail panel for the selected image
+         renderProperties()             <- Properties dialog for the selected image
 
    Filters work the same way: change state.filters, then call renderAll().
 
@@ -89,7 +89,11 @@ const state = {
   lastBatchResults: null,  // results of the last sanitize call
   uploadErrors: [],        // [{filename, error}]
   busy: false,             // true while uploading / sanitizing
-  scrollToVerification: false,
+  propertiesTab: "general",  // active tab of the Properties dialog
+  corrCollapsed: new Set(),  // correlation tree groups the user collapsed
+  uploadPaneHidden: false,   // View → Add Images Pane
+  summaryPaneHidden: false,  // View → Batch Summary Pane
+  serverStatus: null,        // /api/status (ExifTool version, limits...)
   nameCounts: new Map(),   // derived: filename -> count (duplicate names)
   hashCounts: new Map(),   // derived: sha256 -> count (identical files)
 };
@@ -327,28 +331,29 @@ function sanitizationBadge(img) {
 
 function renderAll() {
   const hasImages = state.images.length > 0;
-  for (const id of ["summary-section", "gallery-section", "action-section", "workspace"]) {
-    $(id).classList.toggle("hidden", !hasImages);
-  }
-  if (!hasImages) {
-    renderUploadErrors();
-    return;
-  }
-  ensureMap();
-  renderStats();
-  renderGallery();
-  renderTable();
-  renderMapMarkers();
-  renderCorrelation();
-  renderFilterControls();
-  updateSelectionUI(null);
-  renderInspector();
-  updateActionButtons();
+  $("workspace").classList.toggle("hidden", !hasImages);
+  $("summary-section").classList.toggle("hidden", !hasImages || state.summaryPaneHidden);
+  // The Add Images pane is always shown while the workspace is empty.
+  $("upload-section").classList.toggle("hidden", hasImages && state.uploadPaneHidden);
+  $("upload-section").classList.toggle("compact", hasImages);
   renderUploadErrors();
+  if (hasImages) {
+    ensureMap();
+    renderStats();
+    renderGallery();
+    renderTable();
+    renderMapMarkers();
+    renderCorrelation();
+    renderFilterControls();
+    updateSelectionUI(null);
+    renderProperties();
+  }
+  updateActionButtons();
+  renderChrome();
 }
 
 // --------------------------------------------------------------------------
-// Stats
+// Stats (Batch Summary pane)
 // --------------------------------------------------------------------------
 function renderStats() {
   const all = state.images;
@@ -360,22 +365,32 @@ function renderStats() {
   const software = unique((img) => img.normalized.software);
   const sanitized = all.filter(isSanitizedOk);
   const clean = all.filter((img) => img.sanitization && img.sanitization.verified_clean).length;
+  const scrollToCorrelation = () => $("correlation-section").scrollIntoView({ block: "nearest" });
 
   const cards = [
-    { label: "Total images", value: total, sub: `${formatBytes(all.reduce((s, i) => s + i.file_size, 0))}`, onclick: () => selectAllImages() },
+    { label: "Total images", value: total, sub: formatBytes(all.reduce((s, i) => s + i.file_size, 0)), onclick: () => selectAllImages() },
     { label: "With GPS", value: count(FLAG_FILTERS.gps), sub: pct(count(FLAG_FILTERS.gps)), cls: "s-gps", filter: "gps" },
     { label: "With timestamps", value: count(FLAG_FILTERS.timestamp), sub: pct(count(FLAG_FILTERS.timestamp)), cls: "s-time", filter: "timestamp" },
     { label: "With camera/device", value: count(FLAG_FILTERS.device), sub: pct(count(FLAG_FILTERS.device)), cls: "s-dev", filter: "device" },
     { label: "With software/editor", value: count(FLAG_FILTERS.software), sub: pct(count(FLAG_FILTERS.software)), cls: "s-sw", filter: "software" },
     { label: "With author/copyright", value: count(FLAG_FILTERS.author), sub: pct(count(FLAG_FILTERS.author)), cls: "s-auth", filter: "author" },
-    { label: "Unique devices", value: devices.size, sub: [...devices].slice(0, 2).join(", "), onclick: () => $("correlation-section").scrollIntoView({ behavior: "smooth" }) },
-    { label: "Unique software", value: software.size, sub: [...software].slice(0, 2).join(", "), onclick: () => $("correlation-section").scrollIntoView({ behavior: "smooth" }) },
-    { label: "Sanitized / verified clean", value: `${sanitized.length} / ${clean}`, sub: "click: show not yet sanitized", cls: "s-clean", filter: "unsanitized" },
-    { label: "Rejected files", value: state.uploadErrors.length, sub: state.uploadErrors.length ? "click for details" : "", cls: state.uploadErrors.length ? "s-bad" : "", onclick: () => { const d = $("upload-errors"); d.open = true; d.scrollIntoView({ behavior: "smooth" }); } },
+    { label: "Unique devices", value: devices.size, sub: [...devices].slice(0, 2).join(", "), onclick: scrollToCorrelation },
+    { label: "Unique software", value: software.size, sub: [...software].slice(0, 2).join(", "), onclick: scrollToCorrelation },
+    { label: "Sanitized / clean", value: `${sanitized.length} / ${clean}`, sub: "filter: not yet sanitized", cls: "s-clean", filter: "unsanitized" },
+    {
+      label: "Rejected files", value: state.uploadErrors.length, sub: state.uploadErrors.length ? "click for details" : "",
+      cls: state.uploadErrors.length ? "s-bad" : "",
+      onclick: () => {
+        state.uploadPaneHidden = false;
+        renderAll();
+        const box = $("upload-errors");
+        box.open = true;
+        box.scrollIntoView({ block: "nearest" });
+      },
+    },
   ];
 
-  const grid = $("stats-grid");
-  grid.replaceChildren(...cards.map((card) => {
+  $("stats-grid").replaceChildren(...cards.map((card) => {
     const active = card.filter && state.filters.flags.has(card.filter);
     return h("button", {
       type: "button",
@@ -383,10 +398,82 @@ function renderStats() {
       title: card.filter ? "Click to toggle this filter" : null,
       onclick: card.filter ? () => toggleFlagFilter(card.filter) : card.onclick,
     },
-    h("div", { class: "stat-value" }, String(card.value)),
-    h("div", { class: "stat-label" }, card.label),
-    h("div", { class: "stat-sub" }, card.sub || " "));
+    h("span", { class: "stat-line" },
+      h("span", { class: "stat-value" }, String(card.value)),
+      card.sub ? h("span", { class: "stat-sub" }, card.sub) : null),
+    h("span", { class: "stat-label" }, card.label));
   }));
+}
+
+// --------------------------------------------------------------------------
+// Window chrome: address bar (breadcrumb) + status bar
+// --------------------------------------------------------------------------
+function renderChrome() {
+  renderAddressBar();
+  renderStatusBar();
+}
+
+function renderAddressBar() {
+  const box = $("address-box");
+  const total = state.images.length;
+  const visible = total ? visibleImages().length : 0;
+  const selected = state.selectedId && state.byId.get(state.selectedId);
+  const sep = () => h("span", { class: "crumb-sep" }, "▸");
+  const parts = [
+    h("span", { class: "crumb-folder", "aria-hidden": "true" }),
+    h("button", { type: "button", class: "crumb", onclick: () => selectAllImages(), title: "Back to All Images" }, "Workspace"),
+    sep(),
+    h("button", { type: "button", class: "crumb", onclick: () => selectAllImages(), title: "Show the whole batch (Esc)" }, "All Images"),
+  ];
+  if (total && visible !== total) {
+    parts.push(sep(), h("span", { class: "crumb" }, `Filtered (${visible} of ${total})`));
+  }
+  if (selected) {
+    parts.push(sep(), h("span", { class: "crumb", title: selected.filename }, selected.filename));
+  }
+  if (!total) parts.push(h("span", { class: "crumb-note" }, "empty – add images to start"));
+  box.replaceChildren(...parts);
+}
+
+function renderStatusBar() {
+  const all = state.images;
+  const total = all.length;
+  const gps = all.filter(FLAG_FILTERS.gps).length;
+  const timestamps = all.filter(FLAG_FILTERS.timestamp).length;
+  const clean = all.filter((img) => img.sanitization && img.sanitization.verified_clean).length;
+  const ticked = tickedImages().length;
+
+  const counts = total
+    ? [`${total} image${total === 1 ? "" : "s"}`, `${gps} GPS`, `${timestamps} timestamps`]
+    : ["No images"];
+  if (clean) counts.push(`${clean} sanitized`);
+  if (ticked) counts.push(`${ticked} ticked`);
+  $("sb-counts").textContent = counts.join("  |  ");
+
+  const selected = state.selectedId && state.byId.get(state.selectedId);
+  let info = "";
+  if (selected) {
+    const n = selected.normalized;
+    info = [`Selected: ${selected.filename}`, n.device, n.timestamp, `${selected.width} × ${selected.height}`, formatBytes(selected.file_size)]
+      .filter(Boolean).join("  ·  ");
+  } else if (total) {
+    const visible = visibleImages().length;
+    info = visible === total ? "All Images" : `${visible} of ${total} images shown (filtered)`;
+  }
+  $("sb-selection").textContent = info;
+}
+
+let statusTimer = null;
+/** Right-most status bar field: "Ready", or a message / progress spinner. */
+function setActionStatus(text, spinning) {
+  const el = $("action-status");
+  clearTimeout(statusTimer);
+  el.replaceChildren();
+  if (spinning) el.append(h("span", { class: "spinner" }));
+  el.append(text || "Ready");
+  if (!spinning && text) {
+    statusTimer = setTimeout(() => { if (!state.busy) el.replaceChildren("Ready"); }, 8000);
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -504,8 +591,8 @@ function setTilesEnabled(enabled) {
 
 function markerStyle(selected) {
   return selected
-    ? { radius: 11, color: "#1b1300", weight: 3, fillColor: "#ffb020", fillOpacity: 1 }
-    : { radius: 7, color: "#ffffff", weight: 2, fillColor: "#ff5d5d", fillOpacity: 0.9 };
+    ? { radius: 11, color: "#0b3a6e", weight: 3, fillColor: "#3399ff", fillOpacity: 1 }
+    : { radius: 7, color: "#ffffff", weight: 2, fillColor: "#d9534a", fillOpacity: 0.95 };
 }
 
 function buildPopup(img) {
@@ -559,7 +646,7 @@ function renderMapPaths(withGps) {
     map.removeLayer(mapState.pathLayer);
     return;
   }
-  const colors = ["#4da3ff", "#b18cff", "#2ec4b6", "#f2a93b", "#ff7ab8", "#e0e05a"];
+  const colors = ["#1f6fd1", "#7b4fc4", "#1f8f84", "#c97a00", "#c2387a", "#5a8a00"];
   const byDevice = new Map();
   for (const img of withGps) {
     if (!img.normalized.timestamp_sortable) continue;
@@ -600,7 +687,7 @@ function updateMapNote() {
 }
 
 // --------------------------------------------------------------------------
-// Correlation panel
+// Correlation panel (tree view)
 // --------------------------------------------------------------------------
 function renderCorrelation() {
   const container = $("correlation");
@@ -633,10 +720,18 @@ function renderCorrelation() {
       h("div", { class: "corr-bar" }, h("div", { style: `width:${Math.max(4, (count / max) * 100)}%` })));
     });
     const missing = config.onlyDuplicates ? 0 : state.images.filter((img) => !config.get(img)).length;
-    groups.push(h("div", { class: "corr-group" },
-      h("h4", null, `${config.label} (${entries.length})`),
+    groups.push(h("details", {
+      class: "corr-group",
+      open: !state.corrCollapsed.has(field),
+      ontoggle: (event) => {
+        if (event.target.open) state.corrCollapsed.delete(field);
+        else state.corrCollapsed.add(field);
+      },
+    },
+    h("summary", null, `${config.label} (${entries.length})`),
+    h("div", { class: "corr-items" },
       items.length ? items : h("div", { class: "corr-empty" }, config.onlyDuplicates ? "none found" : "no values"),
-      missing && items.length ? h("div", { class: "corr-empty" }, `${missing} image(s) without a value`) : null));
+      missing && items.length ? h("div", { class: "corr-empty" }, `${missing} image(s) without a value`) : null)));
   }
   container.replaceChildren(...groups);
 }
@@ -693,9 +788,13 @@ function selectImage(id, source) {
   if (id !== null && !state.byId.has(id)) return;
   state.selectedId = id;
   updateSelectionUI(source);
-  renderInspector();
+  renderProperties();
   updateActionButtons();
   updateMapNote();
+  // On narrow screens the Properties panel sits below everything else: bring it into view.
+  if (id && ["gallery", "table", "map"].includes(source) && window.matchMedia("(max-width: 1000px)").matches) {
+    $("inspector").scrollIntoView({ block: "start" });
+  }
 }
 
 /** "All Images": no selection, no filters, everything visible. */
@@ -749,6 +848,7 @@ function updateSelectionUI(source) {
 
   const anyFilter = state.filters.search || state.filters.flags.size || state.filters.group;
   $("btn-all-images").classList.toggle("active", !id && !anyFilter);
+  renderChrome();
 }
 
 /** Move selection to previous/next image in table order (keyboard ← →). */
@@ -764,9 +864,23 @@ function selectRelative(step) {
 // ==========================================================================
 // Ticked (multi-select) images
 // ==========================================================================
+function tickedImages() {
+  return [...state.checked].map((id) => state.byId.get(id)).filter(Boolean);
+}
+
 function toggleChecked(id, checked) {
   if (checked) state.checked.add(id);
   else state.checked.delete(id);
+  updateCheckedUI();
+}
+
+function tickVisible() {
+  for (const img of visibleImages()) state.checked.add(img.id);
+  updateCheckedUI();
+}
+
+function untickAll() {
+  state.checked.clear();
   updateCheckedUI();
 }
 
@@ -785,79 +899,420 @@ function updateCheckedUI() {
   const allTicked = visible.length > 0 && visible.every((img) => state.checked.has(img.id));
   $("table-check-all").checked = allTicked;
   updateActionButtons();
-  const inspectorBox = $("inspector-check");
-  if (inspectorBox) inspectorBox.checked = state.checked.has(state.selectedId);
+  const propertiesBox = $("prop-check");
+  if (propertiesBox) propertiesBox.checked = state.checked.has(state.selectedId);
 }
 
 // ==========================================================================
-// Action buttons (sanitize / download)
+// COMMANDS – every menu item, toolbar button and caption button
 // ==========================================================================
-function updateActionButtons() {
-  const selected = state.selectedId && state.byId.get(state.selectedId);
-  const tickedImages = [...state.checked].map((id) => state.byId.get(id)).filter(Boolean);
-  const anySanitized = state.images.some(isSanitizedOk);
+// Elements carry data-command="name". COMMANDS[name] says:
+//   run()      what happens on click
+//   enabled()  optional, false -> element is disabled
+//   checked()  optional, true  -> menu item shows a check mark / radio dot
+//   label()    optional, dynamic menu label text
+// Option commands (mode, HEIC output, map toggles...) only flip the REAL
+// form controls and fire their "change" event, so there is exactly one
+// source of truth for every setting.
 
-  $("checked-count").textContent = tickedImages.length ? `${tickedImages.length} ticked` : "";
-  $("btn-sanitize-selected").disabled = state.busy || !selected;
-  $("btn-sanitize-checked").disabled = state.busy || tickedImages.length === 0;
-  $("btn-sanitize-checked").textContent = `Sanitize ticked (${tickedImages.length})`;
-  $("btn-sanitize-all").disabled = state.busy || state.images.length === 0;
-  $("btn-download-selected").disabled = !isSanitizedOk(selected);
-  $("btn-zip-checked").disabled = !tickedImages.some(isSanitizedOk);
-  $("btn-zip-all").disabled = !anySanitized;
+const hasImages = () => state.images.length > 0;
+const selectedImage = () => (state.selectedId ? state.byId.get(state.selectedId) : null);
+
+function toggleControl(id) {
+  const box = $(id);
+  box.checked = !box.checked;
+  box.dispatchEvent(new Event("change"));
 }
 
-function setActionStatus(text, spinning) {
-  const el = $("action-status");
-  el.replaceChildren();
-  if (spinning) el.append(h("span", { class: "spinner" }), " ");
-  if (text) el.append(text);
+function setControlValue(id, value) {
+  const control = $(id);
+  control.value = value;
+  control.dispatchEvent(new Event("change"));
 }
 
-// ==========================================================================
-// Inspector (detail panel)
-// ==========================================================================
-function renderInspector() {
-  const panel = $("inspector");
-  if (!state.selectedId) {
-    panel.replaceChildren(...buildOverview());
-    if (state.scrollToVerification) {
-      state.scrollToVerification = false;
-      const target = $("verification-section");
-      if (target) target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+function filterCommand(key) {
+  return { run: () => toggleFlagFilter(key), checked: () => state.filters.flags.has(key), enabled: hasImages };
+}
+
+const COMMANDS = {
+  // File
+  "add-images": { run: () => $("input-files").click(), enabled: () => !state.busy },
+  "add-folder": { run: () => $("input-folder").click(), enabled: () => !state.busy },
+  "download-selected": { run: () => downloadSanitized(state.selectedId), enabled: () => isSanitizedOk(selectedImage()) },
+  "zip-ticked": {
+    run: () => downloadZip([...state.checked]),
+    enabled: () => tickedImages().some(isSanitizedOk),
+    label: () => `Export Ticked Sanitized as ZIP (${tickedImages().filter(isSanitizedOk).length})`,
+  },
+  "zip-all": { run: () => downloadZip("all"), enabled: () => state.images.some(isSanitizedOk) },
+  "clear-workspace": { run: () => clearWorkspace(), enabled: () => !state.busy },
+  // Analyze
+  analyze: { run: () => showBatchAnalysis(), enabled: hasImages },
+  "prev-image": { run: () => selectRelative(-1), enabled: hasImages },
+  "next-image": { run: () => selectRelative(1), enabled: hasImages },
+  "filter-gps": filterCommand("gps"),
+  "filter-timestamp": filterCommand("timestamp"),
+  "filter-device": filterCommand("device"),
+  "filter-software": filterCommand("software"),
+  "filter-author": filterCommand("author"),
+  "filter-unsanitized": filterCommand("unsanitized"),
+  "clear-filters": { run: () => { clearFilters(); renderAll(); }, enabled: hasImages },
+  // View
+  "toggle-upload-pane": { run: () => { state.uploadPaneHidden = !state.uploadPaneHidden; renderAll(); }, checked: () => !state.uploadPaneHidden },
+  "toggle-summary-pane": { run: () => { state.summaryPaneHidden = !state.summaryPaneHidden; renderAll(); }, checked: () => !state.summaryPaneHidden },
+  "toggle-expand-thumbs": { run: () => toggleControl("toggle-gallery-expand"), checked: () => $("toggle-gallery-expand").checked },
+  "toggle-map-path": { run: () => toggleControl("toggle-map-path"), checked: () => $("toggle-map-path").checked },
+  "toggle-map-tiles": { run: () => toggleControl("toggle-map-tiles"), checked: () => $("toggle-map-tiles").checked },
+  "fit-map": { run: () => fitMapToMarkers(), enabled: () => mapState.markers.size > 0 },
+  "window-maximize": { run: () => toggleMaximize(), checked: () => $("app-window").classList.contains("maximized") },
+  "window-minimize": { run: () => $("app-window").classList.toggle("rolled-up") },
+  // Tools
+  "sanitize-selected": { run: () => sanitize({ ids: [state.selectedId] }), enabled: () => !state.busy && !!selectedImage() },
+  "sanitize-ticked": {
+    run: () => sanitize({ ids: [...state.checked] }),
+    enabled: () => !state.busy && tickedImages().length > 0,
+    label: () => `Sanitize Ticked Images (${tickedImages().length})`,
+  },
+  "sanitize-all": { run: () => sanitize({ all: true }), enabled: () => !state.busy && hasImages() },
+  "mode-reencode": { run: () => setControlValue("sanitize-mode", "reencode"), checked: () => $("sanitize-mode").value === "reencode" },
+  "mode-lossless": { run: () => setControlValue("sanitize-mode", "lossless"), checked: () => $("sanitize-mode").value === "lossless" },
+  "heic-jpeg": { run: () => setControlValue("heic-output", "jpeg"), checked: () => $("heic-output").value === "jpeg", enabled: () => !$("heic-output").disabled },
+  "heic-keep": { run: () => setControlValue("heic-output", "heic"), checked: () => $("heic-output").value === "heic", enabled: () => !$("heic-output").disabled },
+  "keep-icc": { run: () => toggleControl("keep-icc"), checked: () => $("keep-icc").checked },
+  "tick-visible": { run: () => tickVisible(), enabled: hasImages },
+  "untick-all": { run: () => untickAll(), enabled: () => state.checked.size > 0 },
+  // Help
+  "help-shortcuts": { run: () => showShortcutsDialog() },
+  "help-privacy": { run: () => showPrivacyDialog() },
+  "help-about": { run: () => showAboutDialog() },
+};
+
+function runCommand(name) {
+  const command = COMMANDS[name];
+  if (!command) return;
+  closeMenus();
+  if (command.enabled && !command.enabled()) return;
+  command.run();
+  refreshCommandStates();
+}
+
+/** Re-evaluate enabled / checked / label for every [data-command] element. */
+function refreshCommandStates() {
+  for (const el of document.querySelectorAll("[data-command]")) {
+    const command = COMMANDS[el.dataset.command];
+    if (!command) continue;
+    el.disabled = command.enabled ? !command.enabled() : false;
+    if (command.checked) {
+      const on = !!command.checked();
+      el.classList.toggle("checked", on);
+      el.setAttribute("aria-checked", on ? "true" : "false");
     }
+    if (command.label) {
+      const label = el.querySelector(".mi-label");
+      if (label) label.textContent = command.label();
+    }
+  }
+}
+
+/** Kept under its old name: called after anything that changes what is possible. */
+function updateActionButtons() {
+  const ticked = tickedImages().length;
+  $("checked-count").textContent = ticked ? `${ticked} ticked` : "";
+  refreshCommandStates();
+  renderStatusBar();
+}
+
+function showBatchAnalysis() {
+  state.propertiesTab = "general";
+  selectAllImages();
+  $("client").scrollTop = 0;
+}
+
+function toggleMaximize() {
+  const maximized = $("app-window").classList.toggle("maximized");
+  document.querySelector(".desktop").classList.toggle("maximized", maximized);
+  if (mapState.map) setTimeout(() => mapState.map.invalidateSize(), 50);
+}
+
+async function clearWorkspace() {
+  if (!confirm("Delete all uploaded images, thumbnails and sanitized copies from this workspace?")) return;
+  try {
+    await api("/api/clear", { method: "POST" });
+    state.images = [];
+    state.byId.clear();
+    state.details.clear();
+    state.checked.clear();
+    state.selectedId = null;
+    state.lastBatchResults = null;
+    state.uploadErrors = [];
+    clearFilters();
+    recomputeDerived();
+    if (mapState.markerLayer) { mapState.markerLayer.clearLayers(); mapState.markers.clear(); }
+    setActionStatus("Workspace cleared", false);
+    renderAll();
+    toast("Workspace cleared.", "ok");
+  } catch (error) {
+    toast(`Could not clear workspace: ${error.message}`, "error");
+  }
+}
+
+// --------------------------------------------------------------------------
+// Menus (menu bar + toolbar drop-downs)
+// --------------------------------------------------------------------------
+function openMenu(menu) {
+  refreshCommandStates();
+  menu.classList.add("open");
+  // Keep the drop-down inside the viewport (small screens / right-hand menus).
+  const dropdown = menu.querySelector(".menu-dropdown");
+  dropdown.style.left = "";
+  const rect = dropdown.getBoundingClientRect();
+  const overflow = rect.right - (window.innerWidth - 6);
+  if (overflow > 0) dropdown.style.left = `${-Math.min(overflow, rect.left - 6)}px`;
+}
+
+function closeMenus() {
+  for (const menu of document.querySelectorAll(".menu.open")) menu.classList.remove("open");
+}
+
+function wireMenus() {
+  for (const title of document.querySelectorAll(".menu > .menu-title")) {
+    const menu = title.parentElement;
+    title.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const wasOpen = menu.classList.contains("open");
+      closeMenus();
+      if (!wasOpen) openMenu(menu);
+    });
+    // Like Windows: once a menu-bar menu is open, hovering another title switches to it.
+    title.addEventListener("mouseenter", () => {
+      const open = document.querySelector(".menubar .menu.open");
+      if (open && open !== menu && menu.closest(".menubar")) {
+        closeMenus();
+        openMenu(menu);
+      }
+    });
+  }
+  document.addEventListener("click", (event) => {
+    const commandEl = event.target.closest("[data-command]");
+    if (commandEl && !commandEl.disabled) {
+      runCommand(commandEl.dataset.command);
+      return;
+    }
+    if (!event.target.closest(".menu")) closeMenus();
+  });
+}
+
+// --------------------------------------------------------------------------
+// Dialogs (Help / About)
+// --------------------------------------------------------------------------
+function showDialog(title, nodes) {
+  closeMenus();
+  $("dialog-title").textContent = title;
+  $("dialog-content").replaceChildren(...nodes);
+  $("dialog-backdrop").classList.remove("hidden");
+  $("dialog-ok").focus();
+}
+
+function closeDialog() {
+  $("dialog-backdrop").classList.add("hidden");
+}
+
+const isDialogOpen = () => !$("dialog-backdrop").classList.contains("hidden");
+
+function showShortcutsDialog() {
+  const rows = [
+    ["Ctrl+O", "Add images"],
+    ["Ctrl+S", "Save sanitized copy of the selected image"],
+    ["← / →", "Previous / next image (table order)"],
+    ["Esc", "All Images (clears selection and filters); closes menus"],
+    ["F1", "This help"],
+    ["Drag & drop", "Drop files or whole folders anywhere into the window"],
+    ["Double-click title bar", "Maximize / restore the window"],
+  ];
+  showDialog("Keyboard Shortcuts", [
+    h("h3", null, "Keyboard shortcuts"),
+    h("table", null, h("tbody", null, rows.map(([keys, action]) => h("tr", null, h("td", null, h("kbd", null, keys)), h("td", null, action))))),
+  ]);
+}
+
+function showPrivacyDialog() {
+  showDialog("Privacy & Local Processing", [
+    h("h3", null, "Everything stays on this machine"),
+    h("p", null, "Uploaded images, thumbnails, extracted metadata, filenames and GPS coordinates are processed by the local Flask server and ExifTool. Nothing is sent to external APIs or AI services."),
+    h("p", null, "The only outside requests are OpenStreetMap map tiles. The tile server can infer which map area you look at – switch them off with View → Online Map Tiles for sensitive cases."),
+    h("p", null, "Originals are never modified. Sanitizing creates NEW copies, re-reads them with ExifTool and only reports \"verified clean\" when no sensitive tag remains."),
+    h("p", { class: "muted" }, "The temporary workspace is deleted when the server stops or when you choose File → Clear Workspace."),
+  ]);
+}
+
+function showAboutDialog() {
+  const status = state.serverStatus || {};
+  showDialog("About Photo Tool", [
+    h("h3", null, "Photo Metadata / OSINT Workbench"),
+    h("p", null, "Batch photo metadata analysis for OSINT, with one-click metadata sanitization for OPSEC."),
+    h("table", null, h("tbody", null,
+      h("tr", null, h("td", null, "ExifTool"), h("td", null, status.exiftool_version || "not found")),
+      h("tr", null, h("td", null, "HEIC / HEIF"), h("td", null, status.heif_available ? "enabled (pillow-heif)" : "disabled – pip install pillow-heif")),
+      h("tr", null, h("td", null, "Formats"), h("td", null, (status.allowed_extensions || ALLOWED_EXTENSIONS).join(", "))),
+      h("tr", null, h("td", null, "Limits"), h("td", null, `${Math.round((status.max_file_size || 0) / 1048576)} MB per file, ${status.max_images || "?"} images`)),
+      h("tr", null, h("td", null, "Map"), h("td", null, "Leaflet · © OpenStreetMap contributors")))),
+  ]);
+}
+
+// ==========================================================================
+// PROPERTIES DIALOG (detail panel) – tabs: General | Metadata | Raw EXIF | Privacy | Sanitize
+// ==========================================================================
+const IMAGE_TABS = [["general", "General"], ["metadata", "Metadata"], ["raw", "Raw EXIF"], ["privacy", "Privacy"], ["sanitize", "Sanitize"]];
+const OVERVIEW_TABS = [["general", "General"], ["privacy", "Privacy"], ["sanitize", "Sanitize"]];
+
+/**
+ * Small static icons. The markup below is a CONSTANT written in this file
+ * (never data from images), so using innerHTML here is safe.
+ */
+const ICONS = {
+  shieldOk: '<svg viewBox="0 0 32 32" class="shield"><path d="M16 2l12 4v9c0 7-5 12-12 15C9 27 4 22 4 15V6z" fill="#3aa63a" stroke="#1f6b1f"/><path d="M16 2v28C9 27 4 22 4 15V6z" fill="#6cc96c"/><path d="M10 16l4 4 8-9" stroke="#fff" stroke-width="2.6" fill="none"/></svg>',
+  shieldWarn: '<svg viewBox="0 0 32 32" class="shield"><path d="M16 2l12 4v9c0 7-5 12-12 15C9 27 4 22 4 15V6z" fill="#e6b021" stroke="#946d0a"/><path d="M16 2v28C9 27 4 22 4 15V6z" fill="#f5cf55"/><path d="M16 9v9" stroke="#3a2a00" stroke-width="3"/><circle cx="16" cy="22.5" r="1.8" fill="#3a2a00"/></svg>',
+  shieldBad: '<svg viewBox="0 0 32 32" class="shield"><path d="M16 2l12 4v9c0 7-5 12-12 15C9 27 4 22 4 15V6z" fill="#c42b1c" stroke="#7a160c"/><path d="M16 2v28C9 27 4 22 4 15V6z" fill="#e0614f"/><path d="M11 11l10 10M21 11L11 21" stroke="#fff" stroke-width="2.6"/></svg>',
+  shieldIdle: '<svg viewBox="0 0 32 32" class="shield"><path d="M16 2l12 4v9c0 7-5 12-12 15C9 27 4 22 4 15V6z" fill="#3b8de0" stroke="#1d5397"/><path d="M16 2v28C9 27 4 22 4 15V6z" fill="#69adf0"/><path d="M16 9v9" stroke="#fff" stroke-width="3"/><circle cx="16" cy="22.5" r="1.8" fill="#fff"/></svg>',
+};
+
+function icon(name) {
+  const span = document.createElement("span");
+  span.style.display = "inline-flex";
+  span.innerHTML = ICONS[name];   // constant markup, see comment above
+  return span;
+}
+
+function securityBanner(kind, title, text) {
+  const iconName = { ok: "shieldOk", warn: "shieldWarn", bad: "shieldBad", idle: "shieldIdle" }[kind];
+  return h("div", { class: `security-banner sb-${kind}` }, icon(iconName), h("div", null, h("strong", null, title), text ? h("span", null, text) : null));
+}
+
+function groupTitle(text) {
+  return h("div", { class: "group-title" }, text);
+}
+
+function renderProperties() {
+  const panel = $("inspector");
+  const id = state.selectedId;
+  if (!id) {
+    panel.replaceChildren(...buildPropertiesFrame("All Images – Batch Properties", OVERVIEW_TABS,
+      (tab) => buildOverviewTab(tab), buildOverviewButtons(), false));
     return;
   }
-  const id = state.selectedId;
+  const summary = state.byId.get(id);
   const detail = state.details.get(id);
   if (detail) {
-    panel.replaceChildren(...buildImageDetail(detail));
-    if (state.scrollToVerification) {
-      state.scrollToVerification = false;
-      const target = $("verification-section");
-      if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
+    panel.replaceChildren(...buildPropertiesFrame(`${summary.filename} Properties`, IMAGE_TABS,
+      (tab) => buildImageTab(tab, detail), buildImageButtons(summary), true));
     return;
   }
-  // Not cached yet: show basic info immediately, then load raw metadata.
-  const summary = state.byId.get(id);
-  panel.replaceChildren(...buildImageHeader(summary), h("div", { class: "muted" }, h("span", { class: "spinner" }), " Loading metadata…"));
+  // Not cached yet: show the frame immediately, then load raw metadata.
+  panel.replaceChildren(...buildPropertiesFrame(`${summary.filename} Properties`, IMAGE_TABS,
+    () => [h("div", { class: "muted" }, h("span", { class: "spinner" }), " Loading metadata…")], buildImageButtons(summary), true));
   api(`/api/images/${id}`)
     .then((data) => {
       state.details.set(id, data);
-      if (state.selectedId === id) renderInspector();   // ignore if user moved on
+      if (state.selectedId === id) renderProperties();   // ignore if the user moved on
     })
     .catch((error) => {
       if (state.selectedId === id) {
-        panel.append(h("div", { class: "errors" }, `Could not load metadata: ${error.message}`));
+        panel.querySelector(".tab-page").replaceChildren(h("div", { class: "errors" }, `Could not load metadata: ${error.message}`));
       }
     });
 }
 
-function buildOverview() {
+function buildPropertiesFrame(title, tabs, buildTab, buttons, withNav) {
+  const active = tabs.some(([key]) => key === state.propertiesTab) ? state.propertiesTab : "general";
+  const page = h("div", { class: "tab-page", role: "tabpanel" });
+  page.replaceChildren(...buildTab(active));
+  return [
+    h("div", { class: "prop-caption" },
+      h("span", { class: "prop-caption-text", title }, title),
+      withNav ? h("button", { class: "btn btn-small", type: "button", title: "Previous image (←)", onclick: () => selectRelative(-1) }, "◀") : null,
+      withNav ? h("button", { class: "btn btn-small", type: "button", title: "Next image (→)", onclick: () => selectRelative(1) }, "▶") : null),
+    h("div", { class: "tabs", role: "tablist" }, tabs.map(([key, label]) => h("button", {
+      type: "button",
+      class: `tab ${key === active ? "active" : ""}`,
+      role: "tab",
+      "aria-selected": key === active ? "true" : "false",
+      onclick: () => { state.propertiesTab = key; renderProperties(); },
+    }, label))),
+    page,
+    h("div", { class: "prop-buttons" }, buttons),
+  ];
+}
+
+function buildImageButtons(img) {
+  return [
+    h("button", { class: "btn", type: "button", disabled: state.busy, onclick: () => sanitize({ ids: [img.id] }) },
+      img.sanitization ? "Sanitize Again" : "Sanitize Image"),
+    h("button", { class: "btn", type: "button", disabled: !isSanitizedOk(img), onclick: () => downloadSanitized(img.id) }, "Download Copy"),
+    h("span", { class: "spacer" }),
+    h("button", { class: "btn btn-default", type: "button", title: "Back to All Images (Esc)", onclick: () => selectAllImages() }, "Close"),
+  ];
+}
+
+function buildOverviewButtons() {
+  return [
+    h("button", { class: "btn", type: "button", disabled: state.busy || !hasImages(), onclick: () => sanitize({ all: true }) }, "Sanitize All"),
+    h("button", { class: "btn", type: "button", disabled: !state.images.some(isSanitizedOk), onclick: () => downloadZip("all") }, "Export All as ZIP"),
+  ];
+}
+
+// ---------------------------------------------------------------- overview tabs
+function buildOverviewTab(tab) {
   const all = state.images;
   const total = all.length;
   const n = (fn) => all.filter(fn).length;
+
+  if (tab === "privacy") {
+    const rows = Object.entries(CATEGORY_LABELS).map(([category, label]) => {
+      const count = n((img) => img.sensitive_categories.includes(category));
+      return h("tr", null, h("th", null, label), h("td", { class: count ? "" : "absent" }, count ? `${count} of ${total} images` : "-"));
+    });
+    const exposed = n((img) => img.sensitive_categories.length > 0);
+    return [
+      exposed
+        ? securityBanner("warn", `${exposed} of ${total} images expose sensitive metadata`, "Sanitize them before sharing.")
+        : securityBanner("ok", "No sensitive metadata found in this batch", null),
+      groupTitle("Exposure by category"),
+      h("table", { class: "kv" }, h("tbody", null, rows)),
+    ];
+  }
+
+  if (tab === "sanitize") {
+    const results = state.lastBatchResults;
+    if (!results || !results.length) {
+      return [
+        securityBanner("idle", "No sanitization has been run yet", "Use Sanitize → Selected / Ticked / All. Originals are never modified."),
+        groupTitle("How it works"),
+        h("ol", { class: "overview-list" },
+          h("li", null, "A NEW copy of each image is written without metadata."),
+          h("li", null, "ExifTool re-reads every copy (nothing is assumed)."),
+          h("li", null, "Original metadata is compared with sanitized metadata, field by field."),
+          h("li", null, "Download single copies or a ZIP via Export.")),
+      ];
+    }
+    const clean = results.filter((r) => r.sanitization.verified_clean).length;
+    const failed = results.filter((r) => ["error", "unverified"].includes(r.sanitization.status)).length;
+    const warn = results.length - clean - failed;
+    const kind = failed ? "bad" : warn ? "warn" : "ok";
+    return [
+      securityBanner(kind, `Last run: ${clean} of ${results.length} verified clean`,
+        `${warn} with remaining sensitive tags · ${failed} failed. Click an image for its Original → Sanitized comparison.`),
+      groupTitle("Results"),
+      h("div", { class: "results-list" }, results.map((r) => {
+        const img = state.byId.get(r.id);
+        return h("button", { type: "button", class: "result-item", onclick: () => selectImage(r.id, "inspector") },
+          h("img", { src: `/images/${r.id}/thumb`, alt: "" }),
+          h("span", { class: "result-name" }, r.filename),
+          img ? sanitizationBadge(img) : null);
+      })),
+    ];
+  }
+
+  // general
   const lines = [
     [n(FLAG_FILTERS.gps), "expose precise GPS location"],
     [n(FLAG_FILTERS.timestamp), "expose when they were taken / edited"],
@@ -867,190 +1322,243 @@ function buildOverview() {
     [n(FLAG_FILTERS.author), "name an author / owner / copyright holder"],
     [n((img) => img.flags.embedded), "carry an embedded thumbnail (may show the uncropped original)"],
   ].filter(([count]) => count > 0);
-
-  const nodes = [
-    h("div", { class: "inspector-head" }, h("div", { class: "inspector-title" }, "All Images – batch overview")),
-    h("p", { class: "muted small" }, "Click a thumbnail, a table row or a map marker to focus the whole workspace on one image. Press Esc or click \"All Images\" to come back."),
-    h("h3", null, "What this batch exposes"),
+  const visible = visibleImages().length;
+  return [
+    h("table", { class: "kv" }, h("tbody", null,
+      h("tr", null, h("th", null, "Images"), h("td", null, `${total}${visible !== total ? ` (${visible} shown by filters)` : ""}`)),
+      h("tr", null, h("th", null, "Total size"), h("td", null, formatBytes(all.reduce((s, i) => s + i.file_size, 0)))),
+      h("tr", null, h("th", null, "Rejected files"), h("td", null, String(state.uploadErrors.length))),
+      h("tr", null, h("th", null, "Ticked"), h("td", null, String(tickedImages().length))))),
+    groupTitle("What this batch exposes"),
     lines.length
-      ? h("ul", { class: "overview-steps" }, lines.map(([count, text]) => h("li", null, h("strong", null, `${count} of ${total}`), ` images ${text}`)))
-      : h("p", { class: "finding-none" }, "No sensitive metadata was found in this batch."),
-    h("h3", null, "OPSEC workflow"),
-    h("ol", { class: "overview-steps" },
-      h("li", null, "Tick images (or use Sanitize ALL)."),
-      h("li", null, "Sanitize – a NEW copy is created, originals are never touched."),
-      h("li", null, "Each copy is re-analysed with ExifTool and compared with the original."),
-      h("li", null, "Download single files or a ZIP.")),
+      ? h("ul", { class: "overview-list" }, lines.map(([count, text]) => h("li", null, h("strong", null, `${count} of ${total}`), ` images ${text}`)))
+      : h("div", { class: "finding-none" }, h("span", { class: "ib-icon ok" }, "✓"), "No sensitive metadata was found in this batch."),
+    groupTitle("Tip"),
+    h("p", { class: "muted" }, "Click a thumbnail, a row in Details or a marker in GPS Locations to open that image's properties. Esc returns to All Images."),
   ];
+}
 
-  const results = state.lastBatchResults;
-  if (results && results.length) {
-    const clean = results.filter((r) => r.sanitization.verified_clean).length;
-    const failed = results.filter((r) => ["error", "unverified"].includes(r.sanitization.status)).length;
-    const warn = results.length - clean - failed;
-    nodes.push(
-      h("h3", { id: "verification-section" }, "Last sanitization run"),
-      h("div", { class: `verify-banner ${failed ? "verify-bad" : warn ? "verify-warn" : "verify-ok"}` },
-        `${results.length} processed · ${clean} verified clean · ${warn} with remaining sensitive tags · ${failed} failed`),
-      h("p", { class: "muted small" }, "Click an image to see its before/after comparison."),
-      h("div", { class: "results-list" }, results.map((r) => {
-        const img = state.byId.get(r.id);
-        return h("button", { type: "button", class: "result-item", onclick: () => selectImage(r.id, "inspector") },
-          h("img", { src: `/images/${r.id}/thumb`, alt: "" }),
-          h("span", { class: "result-name" }, r.filename),
-          img ? sanitizationBadge(img) : null);
-      })));
+// ---------------------------------------------------------------- image tabs
+function buildImageTab(tab, detail) {
+  const img = state.byId.get(detail.id) || detail;
+  if (tab === "metadata") return buildMetadataTab(img, detail);
+  if (tab === "raw") return buildRawMetadata(detail);
+  if (tab === "privacy") return buildPrivacyTab(img, detail);
+  if (tab === "sanitize") return buildSanitizeTab(img, detail);
+  return buildGeneralTab(img, detail);
+}
+
+function buildGeneralTab(img, detail) {
+  const n = detail.normalized || {};
+  const nodes = [
+    h("div", { class: "general-head" },
+      h("img", { src: `/images/${img.id}/thumb`, alt: "" }),
+      h("div", null,
+        h("div", { class: "general-name" }, img.filename),
+        h("div", { class: "muted" }, `${img.format === "HEIF" ? "HEIC" : img.format} image · ${formatBytes(img.file_size)}`))),
+    h("div", { class: "preview-wrap" }, h("img", { src: `/images/${img.id}/preview`, alt: `Preview of ${img.filename}` })),
+  ];
+  if (detail.metadata_error) nodes.push(h("div", { class: "errors" }, `Metadata extraction problem: ${detail.metadata_error}`));
+  if (detail.warnings && detail.warnings.length) {
+    nodes.push(h("div", { class: "warnings" }, h("ul", null, detail.warnings.map((w) => h("li", null, w)))));
+  }
+  nodes.push(
+    h("table", { class: "kv" }, h("tbody", null,
+      kvRow("Type of file", `${n.file_type || img.format} (${n.mime_type || img.mime_type})`),
+      kvRow("Size", `${formatBytes(img.file_size)} (${img.file_size.toLocaleString()} bytes)`),
+      kvRow("Dimensions", `${img.width} × ${img.height}` + (img.display_width !== img.width ? ` (displayed ${img.display_width} × ${img.display_height})` : "")),
+      kvRow("Date taken", n.timestamp ? `${n.timestamp}${n.timestamp_source ? ` (${n.timestamp_source})` : ""}` : null),
+      kvRow("Camera / device", n.device),
+      kvRow("GPS", formatGps(img)),
+      kvRow("Uploaded", img.uploaded_at),
+      kvRow("Metadata tags", String(detail.tag_count)))),
+    groupTitle("Indicators"),
+    h("div", { class: "cell-badges" }, exposureBadges(img), sanitizationBadge(img)),
+    h("div", { class: "inline-actions" },
+      h("label", null, h("input", { type: "checkbox", id: "prop-check", checked: state.checked.has(img.id), onchange: (e) => toggleChecked(img.id, e.target.checked) }), "Ticked for batch sanitize / ZIP")),
+  );
+  return nodes;
+}
+
+function kvRow(label, value) {
+  return h("tr", null, h("th", null, label), h("td", { class: value ? "" : "absent" }, dash(value)));
+}
+
+function buildMetadataTab(img, detail) {
+  const n = detail.normalized || {};
+  const gpsText = formatGps(img);
+  // Every normalized field – grouped like a Windows "Details" property page.
+  const groups = [
+    ["File", [
+      ["File type", n.file_type || img.format],
+      ["MIME type", n.mime_type || img.mime_type],
+      ["File size", formatBytes(img.file_size)],
+      ["Dimensions", `${img.width} × ${img.height}` + (img.display_width !== img.width ? ` (displayed ${img.display_width} × ${img.display_height})` : "")],
+      ["Orientation", n.orientation],
+      ["SHA-256", img.sha256],
+      ["Metadata tags", String(detail.tag_count)],
+    ]],
+    ["Date / time", [
+      ["Date/time original", n.datetime_original],
+      ["Create date", n.create_date],
+      ["Modify date", n.modify_date],
+      ["Timezone offset", n.timezone_offset],
+    ]],
+    ["Camera", [
+      ["Make", n.make],
+      ["Model", n.model],
+      ["Lens", n.lens],
+      ["Serial number", n.serial_number],
+      ["Software / editor", n.software],
+      ["Host computer", n.host_computer],
+    ]],
+    ["GPS", [
+      ["GPS latitude / longitude", gpsText || (n.gps_status ? `not usable (${n.gps_status})` : null)],
+      ["GPS altitude", n.gps_altitude !== null && n.gps_altitude !== undefined ? `${n.gps_altitude} m` : null],
+      ["GPS date/time", n.gps_datetime],
+    ]],
+    ["Origin", [
+      ["Author / artist", n.artist],
+      ["Copyright", n.copyright],
+      ["Description / comment", n.description],
+    ]],
+  ];
+  const nodes = [];
+  for (const [title, rows] of groups) {
+    nodes.push(groupTitle(title), h("table", { class: "kv" }, h("tbody", null, rows.map(([label, value]) => kvRow(label, value)))));
   }
   return nodes;
 }
 
-function buildImageHeader(img) {
-  const n = img.normalized;
-  const osmLink = img.flags.gps
-    ? h("a", {
-      class: "btn btn-small btn-ghost",
-      href: `https://www.openstreetmap.org/?mlat=${encodeURIComponent(n.gps_latitude)}&mlon=${encodeURIComponent(n.gps_longitude)}#map=16/${encodeURIComponent(n.gps_latitude)}/${encodeURIComponent(n.gps_longitude)}`,
-      target: "_blank", rel: "noopener noreferrer",
-      title: "Opens openstreetmap.org in a new tab (sends these coordinates to OSM)",
-    }, "Open in OSM ↗")
-    : null;
-
-  return [
-    h("div", { class: "inspector-head" },
-      h("div", { class: "inspector-title" }, img.filename),
-      h("div", { class: "inspector-nav" },
-        h("button", { class: "btn btn-small", type: "button", title: "Previous (←)", onclick: () => selectRelative(-1) }, "←"),
-        h("button", { class: "btn btn-small", type: "button", title: "Next (→)", onclick: () => selectRelative(1) }, "→"),
-        h("button", { class: "btn btn-small", type: "button", title: "Back to All Images (Esc)", onclick: () => selectAllImages() }, "✕"))),
-    h("div", { class: "preview-wrap" }, h("img", { src: `/images/${img.id}/preview`, alt: `Preview of ${img.filename}` })),
-    h("div", { class: "cell-badges" }, exposureBadges(img), sanitizationBadge(img)),
-    h("div", { class: "inspector-actions" },
-      h("button", { class: "btn btn-primary btn-small", type: "button", disabled: state.busy, onclick: () => sanitize({ ids: [img.id] }) },
-        img.sanitization ? "Sanitize again" : "Sanitize image"),
-      h("button", { class: "btn btn-small", type: "button", disabled: !isSanitizedOk(img), onclick: () => downloadSanitized(img.id) }, "Download sanitized copy"),
-      h("label", { class: "small" }, h("input", { type: "checkbox", id: "inspector-check", checked: state.checked.has(img.id), onchange: (e) => toggleChecked(img.id, e.target.checked) }), " ticked"),
-      osmLink),
-  ];
-}
-
-function buildImageDetail(detail) {
-  const img = state.byId.get(detail.id) || detail;
+function buildPrivacyTab(img, detail) {
   const n = detail.normalized || {};
-  const nodes = buildImageHeader(img);
-
-  if (detail.metadata_error) nodes.push(h("div", { class: "errors" }, `Metadata extraction problem: ${detail.metadata_error}`));
-  if (detail.warnings && detail.warnings.length) {
-    nodes.push(h("div", { class: "warnings small" }, h("ul", { style: "margin:0;padding-left:16px" }, detail.warnings.map((w) => h("li", null, w)))));
-  }
-
-  // --- privacy exposure findings
-  nodes.push(h("h3", null, "Privacy exposure"));
   const categories = Object.keys(CATEGORY_LABELS).filter((c) => detail.sensitive && detail.sensitive[c]);
-  if (categories.length === 0) {
-    nodes.push(h("div", { class: "finding-none small" }, detail.metadata_error ? "Unknown (metadata could not be read)" : "No sensitive metadata found by ExifTool."));
+  const nodes = [];
+  if (detail.metadata_error) {
+    nodes.push(securityBanner("bad", "Exposure unknown", "Metadata could not be read."));
+  } else if (categories.length === 0) {
+    nodes.push(securityBanner("ok", "No sensitive metadata found", "ExifTool found nothing privacy-relevant in this file."));
   } else {
-    nodes.push(h("div", { class: "findings" }, categories.map((c) => {
+    nodes.push(securityBanner("warn", `${categories.length} sensitive categor${categories.length === 1 ? "y" : "ies"} exposed`,
+      "Expand a category to see the exact tags. Use Sanitize to remove them."));
+  }
+  if (categories.length) {
+    nodes.push(groupTitle("Privacy exposure"), h("div", { class: "findings" }, categories.map((c) => {
       const tags = detail.sensitive[c];
       return h("details", { class: "finding" },
         h("summary", null, h("strong", null, CATEGORY_LABELS[c]), ` – ${tags.length} tag(s)`),
         h("ul", null, tags.slice(0, 60).map((t) => h("li", null, h("span", { class: "raw-tag" }, t.key), " = ", t.value)),
-          tags.length > 60 ? h("li", null, `… ${tags.length - 60} more (see raw metadata)`) : null));
+          tags.length > 60 ? h("li", null, `… ${tags.length - 60} more (see Raw EXIF)`) : null));
     })));
   }
-
-  // --- normalized key fields
-  const gpsText = formatGps(img);
-  const fields = [
-    ["File type", n.file_type || img.format],
-    ["MIME type", n.mime_type || img.mime_type],
-    ["File size", formatBytes(img.file_size)],
-    ["Dimensions", `${img.width} × ${img.height}` + (img.display_width !== img.width ? ` (displayed ${img.display_width} × ${img.display_height})` : "")],
-    ["Date/time original", n.datetime_original],
-    ["Create date", n.create_date],
-    ["Modify date", n.modify_date],
-    ["Timezone offset", n.timezone_offset],
-    ["Make", n.make],
-    ["Model", n.model],
-    ["Lens", n.lens],
-    ["Serial number", n.serial_number],
-    ["Software / editor", n.software],
-    ["Host computer", n.host_computer],
-    ["GPS latitude / longitude", gpsText || (n.gps_status ? `not usable (${n.gps_status})` : null)],
-    ["GPS altitude", n.gps_altitude !== null && n.gps_altitude !== undefined ? `${n.gps_altitude} m` : null],
-    ["GPS date/time", n.gps_datetime],
-    ["Orientation", n.orientation],
-    ["Author / artist", n.artist],
-    ["Copyright", n.copyright],
-    ["Description / comment", n.description],
-    ["SHA-256", img.sha256],
-    ["Metadata tags", String(detail.tag_count)],
-  ];
-  nodes.push(h("h3", null, "Key fields"),
-    h("table", { class: "kv" }, h("tbody", null, fields.map(([label, value]) =>
-      h("tr", null, h("th", null, label), h("td", { class: value ? "" : "absent" }, dash(value)))))));
-
-  // --- before/after verification
-  if (detail.sanitization) nodes.push(...buildVerification(detail));
-
-  // --- raw metadata
-  nodes.push(...buildRawMetadata(detail));
+  if (img.flags.gps) {
+    nodes.push(groupTitle("Location"),
+      h("table", { class: "kv" }, h("tbody", null,
+        kvRow("Coordinates", formatGps(img)),
+        kvRow("Altitude", n.gps_altitude !== null && n.gps_altitude !== undefined ? `${n.gps_altitude} m` : null))),
+      h("div", { class: "inline-actions" }, h("a", {
+        href: `https://www.openstreetmap.org/?mlat=${encodeURIComponent(n.gps_latitude)}&mlon=${encodeURIComponent(n.gps_longitude)}#map=16/${encodeURIComponent(n.gps_latitude)}/${encodeURIComponent(n.gps_longitude)}`,
+        target: "_blank", rel: "noopener noreferrer",
+        title: "Opens openstreetmap.org in a new tab (sends these coordinates to OSM)",
+      }, "Open in OpenStreetMap ↗"), h("span", { class: "muted small" }, "(external site)")));
+  }
   return nodes;
+}
+
+function buildSanitizeTab(img, detail) {
+  if (!detail.sanitization) {
+    const mode = $("sanitize-mode").value === "reencode" ? "Re-encode from pixels" : "Lossless ExifTool strip";
+    return [
+      securityBanner("idle", "This image has not been sanitized yet",
+        "Sanitizing writes a NEW copy without metadata and verifies it with ExifTool. The original is never modified."),
+      h("table", { class: "kv" }, h("tbody", null,
+        kvRow("Mode", mode),
+        kvRow("HEIC output", img.format === "HEIF" ? ($("heic-output").value === "jpeg" ? "Convert to JPEG" : "Keep HEIC") : "n/a"),
+        kvRow("ICC profile", $("keep-icc").checked ? "Keep" : "Remove"))),
+      h("div", { class: "inline-actions" },
+        h("button", { class: "btn btn-default", type: "button", disabled: state.busy, onclick: () => sanitize({ ids: [img.id] }) }, "Sanitize Image")),
+    ];
+  }
+  return buildVerification(detail);
 }
 
 function statusLabel(status) {
   return {
     removed: "Removed",
-    still_present: "STILL PRESENT",
+    still_present: "Still present",
     kept_intentionally: "Kept (not sensitive)",
     not_present: "Not present",
   }[status] || status;
 }
 
+const STATUS_GLYPH = { removed: "✓", still_present: "!", kept_intentionally: "i", not_present: "" };
+
+function statusCell(status, value) {
+  const showValue = status !== "removed" && value !== null && value !== undefined;
+  return h("span", { class: `status-cell st-${status}` },
+    h("span", { class: "st-icon" }, STATUS_GLYPH[status] || ""),
+    showValue ? `${value} – ${statusLabel(status)}` : statusLabel(status));
+}
+
 function buildVerification(detail) {
   const s = detail.sanitization;
-  const nodes = [h("h3", { id: "verification-section" }, "Before / after verification")];
-
   if (s.status === "error" || s.status === "unverified") {
-    nodes.push(h("div", { class: "verify-banner verify-bad" }, s.status === "error" ? "✖ Sanitization failed" : "✖ Could not verify the sanitized file"),
-      h("div", { class: "errors small" }, dash(s.error)));
-    return nodes;
+    return [
+      securityBanner("bad", s.status === "error" ? "Sanitization failed" : "Could not verify the sanitized file", dash(s.error)),
+      h("div", { class: "inline-actions" },
+        h("button", { class: "btn", type: "button", disabled: state.busy, onclick: () => sanitize({ ids: [detail.id] }) }, "Try Again")),
+    ];
   }
 
-  nodes.push(h("div", { class: `verify-banner ${s.verified_clean ? "verify-ok" : "verify-warn"}` },
+  const nodes = [
     s.verified_clean
-      ? "✔ Verified: ExifTool re-read the sanitized copy and found NO sensitive metadata."
-      : `⚠ ${s.remaining_sensitive_count} sensitive tag(s) are STILL PRESENT in the sanitized copy.`));
-
-  nodes.push(h("table", { class: "kv" }, h("tbody", null,
-    h("tr", null, h("th", null, "Mode"), h("td", null, s.mode === "reencode" ? "Re-encode from pixels" : "Lossless ExifTool strip")),
-    h("tr", null, h("th", null, "Format"), h("td", null, `${detail.format === "HEIF" ? "HEIC" : detail.format} → ${s.output_format === "HEIF" ? "HEIC" : s.output_format}`)),
-    h("tr", null, h("th", null, "Metadata tags"), h("td", null, `${s.before_tag_count} → ${s.after_tag_count} (${s.removed_tags.length} removed)`)),
-    h("tr", null, h("th", null, "File size"), h("td", null, `${formatBytes(detail.file_size)} → ${formatBytes(s.file_size)}`)),
-    h("tr", null, h("th", null, "Image check"), h("td", null, s.image_check ? s.image_check.message : "-")),
-    h("tr", null, h("th", null, "Download name"), h("td", null, s.download_name)),
-    h("tr", null, h("th", null, "Sanitized at"), h("td", null, s.sanitized_at)))));
-
+      ? securityBanner("ok", "Verified clean", "ExifTool re-read the sanitized copy and found NO sensitive metadata.")
+      : securityBanner("warn", `${s.remaining_sensitive_count} sensitive tag(s) still present`, "See the comparison below. Try the other sanitize mode."),
+    h("table", { class: "kv" }, h("tbody", null,
+      kvRow("Mode", s.mode === "reencode" ? "Re-encode from pixels" : "Lossless ExifTool strip"),
+      kvRow("Format", `${detail.format === "HEIF" ? "HEIC" : detail.format} → ${s.output_format === "HEIF" ? "HEIC" : s.output_format}`),
+      kvRow("Metadata tags", `${s.before_tag_count} → ${s.after_tag_count} (${s.removed_tags.length} removed)`),
+      kvRow("File size", `${formatBytes(detail.file_size)} → ${formatBytes(s.file_size)}`),
+      kvRow("Image check", s.image_check ? s.image_check.message : null),
+      kvRow("Download name", s.download_name),
+      kvRow("Sanitized at", s.sanitized_at))),
+  ];
   if (s.notes && s.notes.length) nodes.push(h("ul", { class: "notes" }, s.notes.map((note) => h("li", null, note))));
 
-  // Field-by-field comparison (only fields that existed before or after)
+  // Original Metadata -> Sanitized Metadata, field by field
   const rows = s.field_comparison.filter((r) => r.status !== "not_present");
-  nodes.push(h("table", { class: "compare" },
-    h("thead", null, h("tr", null, h("th", null, "Field"), h("th", null, "Original"), h("th", null, "Sanitized"), h("th", null, "Result"))),
-    h("tbody", null, rows.length ? rows.map((r) => h("tr", null,
-      h("td", null, r.field),
-      h("td", null, dash(r.before)),
-      h("td", null, r.after === null ? "—" : r.after),
-      h("td", { class: `st-${r.status}` }, statusLabel(r.status))))
-      : h("tr", null, h("td", { colspan: "4", class: "muted" }, "The original had none of the key fields.")))));
+  const notPresent = s.field_comparison.length - rows.length;
+  nodes.push(groupTitle("Original Metadata → Sanitized Metadata"),
+    h("table", { class: "compare" },
+      h("thead", null, h("tr", null,
+        h("th", { class: "c-field" }, "Field"),
+        h("th", null, "Original Metadata"),
+        h("th", { class: "c-arrow" }, "→"),
+        h("th", null, "Sanitized Metadata"))),
+      h("tbody", null, rows.length
+        ? rows.map((r) => h("tr", null,
+          h("td", { class: "c-field" }, r.field),
+          h("td", { class: "c-before" }, dash(r.before)),
+          h("td", { class: "c-arrow" }, "→"),
+          h("td", null, statusCell(r.status, r.after))))
+        : h("tr", null, h("td", { colspan: "4", class: "muted" }, "The original had none of the key fields.")))));
+  if (notPresent) nodes.push(h("div", { class: "muted small" }, `${notPresent} other key field(s) were not present in the original.`));
 
   // Category comparison
   const catRows = s.category_comparison.filter((r) => r.status !== "not_present");
   if (catRows.length) {
-    nodes.push(h("table", { class: "compare", style: "margin-top:8px" },
-      h("thead", null, h("tr", null, h("th", null, "Category"), h("th", null, "Tags before"), h("th", null, "Tags after"), h("th", null, "Result"))),
-      h("tbody", null, catRows.map((r) => h("tr", null,
-        h("td", null, r.label), h("td", null, String(r.before_count)), h("td", null, String(r.after_count)),
-        h("td", { class: `st-${r.status}` }, statusLabel(r.status)))))));
+    nodes.push(groupTitle("Sensitive categories"),
+      h("table", { class: "compare" },
+        h("thead", null, h("tr", null,
+          h("th", { class: "c-field" }, "Category"),
+          h("th", null, "Original"),
+          h("th", { class: "c-arrow" }, "→"),
+          h("th", null, "Sanitized"))),
+        h("tbody", null, catRows.map((r) => h("tr", null,
+          h("td", { class: "c-field" }, r.label),
+          h("td", { class: "c-before" }, `${r.before_count} tag(s)`),
+          h("td", { class: "c-arrow" }, "→"),
+          h("td", null, statusCell(r.status, r.after_count ? `${r.after_count} tag(s)` : null)))))));
   }
 
   if (s.remaining_sensitive_count > 0) {
@@ -1058,7 +1566,7 @@ function buildVerification(detail) {
     for (const [cat, tags] of Object.entries(s.remaining_sensitive)) {
       for (const t of tags) list.push(h("li", null, `[${CATEGORY_LABELS[cat] || cat}] `, h("span", { class: "raw-tag" }, t.key), " = ", t.value));
     }
-    nodes.push(h("div", { class: "errors small", style: "margin-top:8px" }, h("strong", null, "Still present:"), h("ul", null, list)));
+    nodes.push(h("div", { class: "errors small", style: "margin-top:6px" }, h("strong", null, "Still present:"), h("ul", null, list)));
   }
 
   nodes.push(
@@ -1070,8 +1578,8 @@ function buildVerification(detail) {
     h("details", { class: "collapsible" },
       h("summary", null, `Removed tags (${s.removed_tags.length})`),
       h("ul", { class: "tag-list" }, s.removed_tags.map((key) => h("li", null, key)))),
-    h("div", { class: "inspector-actions" },
-      h("button", { class: "btn btn-primary btn-small", type: "button", disabled: !isSanitizedOk(detail), onclick: () => downloadSanitized(detail.id) }, `Download ${s.download_name}`)),
+    h("div", { class: "inline-actions" },
+      h("button", { class: "btn btn-default", type: "button", disabled: !isSanitizedOk(detail), onclick: () => downloadSanitized(detail.id) }, `Download ${s.download_name}`)),
   );
   return nodes;
 }
@@ -1108,10 +1616,9 @@ function buildRawMetadata(detail) {
   };
   fill("");
   return [
-    h("h3", null, `Raw metadata (${keys.length} tags, ExifTool)`),
-    h("div", { class: "muted small" }, "Group = ExifTool family-0:family-1 group. Rows marked red belong to a sensitive category. Filesystem tags of the temporary server copy are hidden."),
+    h("div", { class: "muted small" }, `${keys.length} tags from ExifTool. Group = family-0:family-1. Red rows belong to a sensitive category. Filesystem tags of the temporary server copy are hidden.`),
     h("input", { type: "search", class: "raw-filter", placeholder: "Filter tags or values…", oninput: (e) => fill(e.target.value) }),
-    h("div", { class: "raw-scroll" }, h("table", { class: "kv" }, tbody)),
+    h("table", { class: "kv" }, tbody),
   ];
 }
 
@@ -1201,9 +1708,10 @@ async function uploadFiles(fileList) {
   let added = 0;
   const setProgress = () => {
     $("upload-progress-fill").style.width = `${Math.round((done / accepted.length) * 100)}%`;
-    $("upload-progress-text").textContent = `Uploading & analyzing locally: ${done} / ${accepted.length} files processed, ${added} added`;
+    $("upload-progress-text").textContent = `${done} / ${accepted.length}`;
   };
   setProgress();
+  setActionStatus("Analyzing locally…", true);
 
   for (const chunk of chunkFiles(accepted)) {
     const form = new FormData();
@@ -1222,8 +1730,8 @@ async function uploadFiles(fileList) {
   }
 
   state.busy = false;
-  $("upload-progress-text").textContent = `Done: ${added} image(s) added, ${accepted.length - added + rejected.length} rejected/skipped.`;
-  setTimeout(() => progress.classList.add("hidden"), 4000);
+  setActionStatus(`${added} added, ${accepted.length - added + rejected.length} rejected/skipped`, false);
+  setTimeout(() => progress.classList.add("hidden"), 2500);
   renderAll();
   toast(`${added} image(s) analyzed locally.`, added ? "ok" : "error");
 }
@@ -1271,7 +1779,7 @@ async function sanitize(target) {
     const message = `Sanitized ${data.results.length}: ${clean} verified clean, ${data.results.length - clean - failed} with remaining tags, ${failed} failed.`;
     setActionStatus(message, false);
     toast(message, failed ? "error" : "ok");
-    state.scrollToVerification = true;
+    state.propertiesTab = "sanitize";       // show Original → Sanitized comparison
   } catch (error) {
     setActionStatus(`Sanitization failed: ${error.message}`, false);
     toast(`Sanitization failed: ${error.message}`, "error");
@@ -1303,34 +1811,48 @@ function downloadZip(ids) {
 // ==========================================================================
 
 function wireEvents() {
-  // Upload
-  const dropZone = $("drop-zone");
+  wireMenus();
+
+  // Upload: buttons + hidden file inputs
   $("btn-pick-files").addEventListener("click", (e) => { e.stopPropagation(); $("input-files").click(); });
   $("btn-pick-folder").addEventListener("click", (e) => { e.stopPropagation(); $("input-folder").click(); });
+  const dropZone = $("drop-zone");
   dropZone.addEventListener("click", () => $("input-files").click());
   dropZone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("input-files").click(); } });
   for (const id of ["input-files", "input-folder"]) {
     $(id).addEventListener("change", (e) => { uploadFiles(e.target.files); e.target.value = ""; });
   }
-  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
-  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
-  dropZone.addEventListener("drop", async (e) => {
+
+  // Drag & drop ANYWHERE in the window (files or whole folders).
+  const hasFiles = (event) => [...((event.dataTransfer && event.dataTransfer.types) || [])].includes("Files");
+  let dragDepth = 0;
+  document.addEventListener("dragenter", (e) => {
+    if (!hasFiles(e)) return;
+    dragDepth += 1;
+    $("client").classList.add("drag-active");
+  });
+  document.addEventListener("dragleave", (e) => {
+    if (!hasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) $("client").classList.remove("drag-active");
+  });
+  document.addEventListener("dragover", (e) => e.preventDefault());
+  document.addEventListener("drop", async (e) => {
     e.preventDefault();
-    dropZone.classList.remove("dragover");
+    dragDepth = 0;
+    $("client").classList.remove("drag-active");
+    if (!hasFiles(e)) return;
     const files = await filesFromDrop(e.dataTransfer);
     uploadFiles(files);
   });
-  // Avoid the browser opening a file that is dropped outside the drop zone.
-  window.addEventListener("dragover", (e) => e.preventDefault());
-  window.addEventListener("drop", (e) => e.preventDefault());
 
-  // Gallery toolbar
+  // Thumbnails pane
   $("btn-all-images").addEventListener("click", selectAllImages);
-  $("btn-check-visible").addEventListener("click", () => { for (const img of visibleImages()) state.checked.add(img.id); updateCheckedUI(); });
-  $("btn-uncheck-all").addEventListener("click", () => { state.checked.clear(); updateCheckedUI(); });
+  $("btn-check-visible").addEventListener("click", tickVisible);
+  $("btn-uncheck-all").addEventListener("click", untickAll);
   $("toggle-gallery-expand").addEventListener("change", (e) => $("gallery").classList.toggle("expanded", e.target.checked));
 
-  // Filters
+  // Filters (search box lives in the address bar)
   let searchTimer = null;
   $("filter-search").addEventListener("input", (e) => {
     clearTimeout(searchTimer);
@@ -1341,7 +1863,7 @@ function wireEvents() {
   }
   $("btn-clear-filters").addEventListener("click", () => { clearFilters(); renderAll(); });
 
-  // Table sorting + tick-all
+  // Details list: column sorting + tick-all
   for (const th of document.querySelectorAll("#meta-table th[data-sort]")) {
     th.addEventListener("click", () => {
       const key = th.dataset.sort;
@@ -1364,50 +1886,47 @@ function wireEvents() {
     updateCheckedUI();
   });
 
-  // Map toolbar
+  // Map pane
   $("btn-map-fit").addEventListener("click", fitMapToMarkers);
   $("toggle-map-path").addEventListener("change", () => renderMapMarkers());
   $("toggle-map-tiles").addEventListener("change", (e) => setTilesEnabled(e.target.checked));
 
-  // Sanitize / download
-  $("btn-sanitize-selected").addEventListener("click", () => state.selectedId && sanitize({ ids: [state.selectedId] }));
-  $("btn-sanitize-checked").addEventListener("click", () => sanitize({ ids: [...state.checked] }));
-  $("btn-sanitize-all").addEventListener("click", () => sanitize({ all: true }));
-  $("btn-download-selected").addEventListener("click", () => state.selectedId && downloadSanitized(state.selectedId));
-  $("btn-zip-checked").addEventListener("click", () => downloadZip([...state.checked]));
-  $("btn-zip-all").addEventListener("click", () => downloadZip("all"));
+  // Sanitize options: keep menus + Sanitize tab in sync
+  for (const id of ["sanitize-mode", "heic-output", "keep-icc"]) {
+    $(id).addEventListener("change", () => {
+      refreshCommandStates();
+      if (state.selectedId && state.propertiesTab === "sanitize") renderProperties();
+    });
+  }
 
-  // Clear workspace
-  $("btn-clear-workspace").addEventListener("click", async () => {
-    if (!confirm("Delete all uploaded images, thumbnails and sanitized copies from this workspace?")) return;
-    try {
-      await api("/api/clear", { method: "POST" });
-      state.images = [];
-      state.byId.clear();
-      state.details.clear();
-      state.checked.clear();
-      state.selectedId = null;
-      state.lastBatchResults = null;
-      state.uploadErrors = [];
-      clearFilters();
-      recomputeDerived();
-      if (mapState.markerLayer) { mapState.markerLayer.clearLayers(); mapState.markers.clear(); }
-      setActionStatus("", false);
-      renderAll();
-      toast("Workspace cleared.", "ok");
-    } catch (error) {
-      toast(`Could not clear workspace: ${error.message}`, "error");
-    }
+  // Window chrome
+  document.querySelector("#app-window > .titlebar").addEventListener("dblclick", (e) => {
+    if (!e.target.closest(".caption-buttons")) toggleMaximize();
   });
+  $("dialog-ok").addEventListener("click", closeDialog);
+  $("dialog-close").addEventListener("click", closeDialog);
+  $("dialog-backdrop").addEventListener("click", (e) => { if (e.target === $("dialog-backdrop")) closeDialog(); });
 
-  // Keyboard navigation
+  // Keyboard
   document.addEventListener("keydown", (e) => {
+    const key = e.key;
+    if (key === "Escape") {
+      if (isDialogOpen()) { closeDialog(); return; }
+      if (document.querySelector(".menu.open")) { closeMenus(); return; }
+    }
+    if (isDialogOpen()) return;
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && key.toLowerCase() === "o") { e.preventDefault(); runCommand("add-images"); return; }
+    if (ctrl && key.toLowerCase() === "s") { e.preventDefault(); runCommand("download-selected"); return; }
+    if (key === "F1") { e.preventDefault(); runCommand("help-shortcuts"); return; }
+    if (key === "Alt") { $("menubar").classList.toggle("show-access-keys"); return; }
+
     const tag = (e.target.tagName || "").toLowerCase();
-    if (["input", "select", "textarea"].includes(tag) || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (["input", "select", "textarea"].includes(tag) || ctrl || e.altKey) return;
     if (state.images.length === 0) return;
-    if (e.key === "ArrowRight" || e.key === "ArrowDown") { e.preventDefault(); selectRelative(1); }
-    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { e.preventDefault(); selectRelative(-1); }
-    else if (e.key === "Escape") { selectAllImages(); }
+    if (key === "ArrowRight" || key === "ArrowDown") { e.preventDefault(); selectRelative(1); }
+    else if (key === "ArrowLeft" || key === "ArrowUp") { e.preventDefault(); selectRelative(-1); }
+    else if (key === "Escape") { selectAllImages(); }
   });
 
   window.addEventListener("resize", () => mapState.map && mapState.map.invalidateSize());
@@ -1420,6 +1939,7 @@ async function init() {
   wireEvents();
   try {
     const status = await api("/api/status");
+    state.serverStatus = status;
     window.PHOTO_TOOL_MAX_FILE_SIZE = status.max_file_size;
     ALLOWED_EXTENSIONS = status.allowed_extensions;
     if (!status.heif_available) {
@@ -1433,6 +1953,7 @@ async function init() {
   } catch (error) {
     toast(`Could not reach the local server: ${error.message}`, "error");
   }
+  setActionStatus("Ready", false);
   renderAll();
 }
 
