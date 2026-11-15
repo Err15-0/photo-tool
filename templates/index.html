@@ -3,239 +3,379 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Photo Tool – OSINT Metadata Workspace</title>
+  <title>Photo Metadata / OSINT Workbench</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
+<!--
+  Layout (Windows 7 style desktop utility):
+    .desktop > .window
+      .titlebar        glass caption with _ □ ×
+      .menubar         File | Analyze | View | Tools | Help   (items use data-command)
+      .toolbar         Add Images | Add Folder | Analyze | Sanitize ▾ | Export ▾ | options
+      .addressbar      breadcrumb (Workspace › All Images › file) + search box
+      .client          scrolling area with all panes
+      .statusbar       live counts + "Ready" / progress
+  Every menu item / toolbar button carries data-command="..."; the command
+  table in static/js/app.js (COMMANDS) decides what it does and whether it
+  is enabled or checked.
+-->
+<div class="desktop">
+<div class="window" id="app-window">
 
-<!-- =====================================================================
-     HEADER
-     ===================================================================== -->
-<header class="app-header">
-  <div class="brand">
-    <div class="logo" aria-hidden="true">◎</div>
-    <div>
-      <h1>Photo Tool</h1>
-      <p class="tagline">Batch photo metadata analysis for <strong>OSINT</strong>, with one-click sanitization for <strong>OPSEC</strong>.</p>
+  <!-- ================================================================ TITLE BAR -->
+  <div class="titlebar">
+    <div class="titlebar-icon" aria-hidden="true">
+      <svg viewBox="0 0 16 16" width="16" height="16"><defs><linearGradient id="ti" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#9fd2ff"/><stop offset="1" stop-color="#1c63b7"/></linearGradient></defs><rect x="1" y="3" width="14" height="11" rx="2" fill="url(#ti)" stroke="#0d3f7a"/><circle cx="8" cy="8.5" r="3.2" fill="#e8f4ff" stroke="#0d3f7a"/><circle cx="8" cy="8.5" r="1.5" fill="#1c63b7"/><rect x="3" y="1.5" width="4" height="2" fill="#0d3f7a"/></svg>
+    </div>
+    <div class="titlebar-text">Photo Metadata / OSINT Workbench</div>
+    <div class="caption-buttons">
+      <button type="button" class="caption-btn" data-command="window-minimize" title="Minimize (roll up the window)">
+        <svg viewBox="0 0 10 10" width="10" height="10"><rect x="1" y="6" width="8" height="2" fill="currentColor"/></svg>
+      </button>
+      <button type="button" class="caption-btn" data-command="window-maximize" title="Maximize / restore">
+        <svg viewBox="0 0 10 10" width="10" height="10"><rect x="1" y="1" width="8" height="7" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="1" y="1" width="8" height="2" fill="currentColor"/></svg>
+      </button>
+      <button type="button" class="caption-btn caption-close" data-command="clear-workspace" title="Close workspace (deletes all uploaded images after confirmation)">
+        <svg viewBox="0 0 10 10" width="10" height="10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.8"/></svg>
+      </button>
     </div>
   </div>
-  <div class="header-right">
-    <div class="privacy-note" title="Uploaded images, thumbnails, metadata, filenames and GPS coordinates never leave this machine.">
-      🔒 All image processing happens <strong>locally</strong> on this machine. Nothing is sent to external APIs or AI services.
-      Only OpenStreetMap map tiles are downloaded (can be switched off on the map).
-    </div>
-    <div class="header-status">
-      {% if heif_available %}
-        <span class="pill pill-ok" title="pillow-heif {{ heif_version }}">HEIC ✓</span>
-      {% else %}
-        <span class="pill pill-bad" title="pip install pillow-heif">HEIC off</span>
-      {% endif %}
-      {% if exiftool_version %}
-        <span class="pill pill-ok">ExifTool {{ exiftool_version }}</span>
-      {% else %}
-        <span class="pill pill-bad">ExifTool NOT found</span>
-      {% endif %}
-      <button id="btn-clear-workspace" class="btn btn-ghost btn-small" type="button">Clear workspace</button>
-    </div>
-  </div>
-</header>
 
-{% if not exiftool_version %}
-<div class="banner banner-error">
-  ExifTool is not installed or not on PATH. Metadata extraction and verification will fail.
-  Install it with <code>sudo apt install libimage-exiftool-perl</code> and restart the server.
-</div>
-{% endif %}
+  <div class="window-body" id="window-body">
 
-<main class="app-main">
-
-  <!-- ===================================================================
-       1. UPLOAD
-       =================================================================== -->
-  <section class="card" id="upload-section">
-    <div class="card-title-row">
-      <h2><span class="step">1</span> Upload images</h2>
-      <span class="muted small">Formats: {{ allowed_extensions | join(', ') }} · max {{ max_file_mb }} MB per file · max {{ max_images }} images</span>
-    </div>
-    <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop images or folders here">
-      <div class="drop-icon" aria-hidden="true">⇪</div>
-      <div><strong>Drag &amp; drop images or whole folders here</strong></div>
-      <div class="muted">or</div>
-      <div class="drop-buttons">
-        <button id="btn-pick-files" class="btn btn-primary" type="button">Select images…</button>
-        <button id="btn-pick-folder" class="btn" type="button">Select folder…</button>
+    <!-- ============================================================== MENU BAR -->
+    <nav class="menubar" id="menubar" role="menubar">
+      <div class="menu">
+        <button type="button" class="menu-title" aria-haspopup="true"><u>F</u>ile</button>
+        <div class="menu-dropdown" role="menu">
+          <button type="button" class="menu-item" data-command="add-images"><span class="mi-check"></span><span class="mi-label">Add Images…</span><span class="mi-key">Ctrl+O</span></button>
+          <button type="button" class="menu-item" data-command="add-folder"><span class="mi-check"></span><span class="mi-label">Add Folder…</span><span class="mi-key"></span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="download-selected"><span class="mi-check"></span><span class="mi-label">Save Sanitized Copy of Selected Image</span><span class="mi-key">Ctrl+S</span></button>
+          <button type="button" class="menu-item" data-command="zip-ticked"><span class="mi-check"></span><span class="mi-label">Export Ticked Sanitized as ZIP</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="zip-all"><span class="mi-check"></span><span class="mi-label">Export All Sanitized as ZIP</span><span class="mi-key"></span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="clear-workspace"><span class="mi-check"></span><span class="mi-label">Clear Workspace…</span><span class="mi-key"></span></button>
+        </div>
       </div>
-      <input id="input-files" type="file" multiple accept=".jpg,.jpeg,.jpe,.png,.webp,.tif,.tiff,.heic,.heif,image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif" hidden>
-      <input id="input-folder" type="file" multiple webkitdirectory hidden>
-    </div>
-    <div id="upload-progress" class="upload-progress hidden">
-      <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill"></div></div>
-      <div id="upload-progress-text" class="small"></div>
-    </div>
-    <details id="upload-errors" class="upload-errors hidden">
-      <summary id="upload-errors-summary"></summary>
-      <ul id="upload-errors-list"></ul>
-    </details>
-  </section>
+      <div class="menu">
+        <button type="button" class="menu-title" aria-haspopup="true"><u>A</u>nalyze</button>
+        <div class="menu-dropdown" role="menu">
+          <button type="button" class="menu-item" data-command="analyze"><span class="mi-check"></span><span class="mi-label">Batch Analysis (All Images)</span><span class="mi-key">Esc</span></button>
+          <button type="button" class="menu-item" data-command="prev-image"><span class="mi-check"></span><span class="mi-label">Previous Image</span><span class="mi-key">←</span></button>
+          <button type="button" class="menu-item" data-command="next-image"><span class="mi-check"></span><span class="mi-label">Next Image</span><span class="mi-key">→</span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="filter-gps"><span class="mi-check"></span><span class="mi-label">Only Images with GPS</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="filter-timestamp"><span class="mi-check"></span><span class="mi-label">Only Images with Timestamp</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="filter-device"><span class="mi-check"></span><span class="mi-label">Only Images with Device Info</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="filter-software"><span class="mi-check"></span><span class="mi-label">Only Images with Software Info</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="filter-author"><span class="mi-check"></span><span class="mi-label">Only Images with Author Info</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="filter-unsanitized"><span class="mi-check"></span><span class="mi-label">Only Not Yet Sanitized</span><span class="mi-key"></span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="clear-filters"><span class="mi-check"></span><span class="mi-label">Clear All Filters</span><span class="mi-key"></span></button>
+        </div>
+      </div>
+      <div class="menu">
+        <button type="button" class="menu-title" aria-haspopup="true"><u>V</u>iew</button>
+        <div class="menu-dropdown" role="menu">
+          <button type="button" class="menu-item" data-command="toggle-upload-pane"><span class="mi-check"></span><span class="mi-label">Add Images Pane</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="toggle-summary-pane"><span class="mi-check"></span><span class="mi-label">Batch Summary Pane</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="toggle-expand-thumbs"><span class="mi-check"></span><span class="mi-label">Show All Thumbnails (no scrolling)</span><span class="mi-key"></span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="toggle-map-path"><span class="mi-check"></span><span class="mi-label">Chronological Path on Map</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="toggle-map-tiles"><span class="mi-check"></span><span class="mi-label">Online Map Tiles (OpenStreetMap)</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="fit-map"><span class="mi-check"></span><span class="mi-label">Fit Map to All Markers</span><span class="mi-key"></span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="window-maximize"><span class="mi-check"></span><span class="mi-label">Maximize Window</span><span class="mi-key"></span></button>
+        </div>
+      </div>
+      <div class="menu">
+        <button type="button" class="menu-title" aria-haspopup="true"><u>T</u>ools</button>
+        <div class="menu-dropdown" role="menu">
+          <button type="button" class="menu-item" data-command="sanitize-selected"><span class="mi-check"></span><span class="mi-label">Sanitize Selected Image</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="sanitize-ticked"><span class="mi-check"></span><span class="mi-label">Sanitize Ticked Images</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="sanitize-all"><span class="mi-check"></span><span class="mi-label">Sanitize All Images</span><span class="mi-key"></span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="mode-reencode" data-radio="1"><span class="mi-check"></span><span class="mi-label">Mode: Re-encode from Pixels (max removal)</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="mode-lossless" data-radio="1"><span class="mi-check"></span><span class="mi-label">Mode: Lossless ExifTool Strip</span><span class="mi-key"></span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="heic-jpeg" data-radio="1"><span class="mi-check"></span><span class="mi-label">HEIC Output: Convert to JPEG</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="heic-keep" data-radio="1"><span class="mi-check"></span><span class="mi-label">HEIC Output: Keep HEIC</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="keep-icc"><span class="mi-check"></span><span class="mi-label">Keep ICC Colour Profile</span><span class="mi-key"></span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="tick-visible"><span class="mi-check"></span><span class="mi-label">Tick All Visible Images</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="untick-all"><span class="mi-check"></span><span class="mi-label">Untick All</span><span class="mi-key"></span></button>
+        </div>
+      </div>
+      <div class="menu">
+        <button type="button" class="menu-title" aria-haspopup="true"><u>H</u>elp</button>
+        <div class="menu-dropdown" role="menu">
+          <button type="button" class="menu-item" data-command="help-shortcuts"><span class="mi-check"></span><span class="mi-label">Keyboard Shortcuts</span><span class="mi-key">F1</span></button>
+          <button type="button" class="menu-item" data-command="help-privacy"><span class="mi-check"></span><span class="mi-label">Privacy &amp; Local Processing</span><span class="mi-key"></span></button>
+          <div class="menu-sep"></div>
+          <button type="button" class="menu-item" data-command="help-about"><span class="mi-check"></span><span class="mi-label">About Photo Tool</span><span class="mi-key"></span></button>
+        </div>
+      </div>
+    </nav>
 
-  <!-- ===================================================================
-       2. BATCH SUMMARY
-       =================================================================== -->
-  <section class="card hidden" id="summary-section">
-    <div class="card-title-row">
-      <h2><span class="step">2</span> Batch summary</h2>
-      <span class="muted small">Click a card to filter the workspace</span>
-    </div>
-    <div id="stats-grid" class="stats-grid"></div>
-  </section>
-
-  <!-- ===================================================================
-       3. THUMBNAIL GALLERY
-       =================================================================== -->
-  <section class="card hidden" id="gallery-section">
-    <div class="card-title-row">
-      <h2><span class="step">3</span> Thumbnail overview</h2>
-      <div class="gallery-toolbar">
-        <button id="btn-all-images" class="btn btn-all active" type="button">▦ All Images</button>
-        <span id="gallery-count" class="muted small"></span>
-        <button id="btn-check-visible" class="btn btn-small" type="button" title="Tick every visible image">Tick visible</button>
-        <button id="btn-uncheck-all" class="btn btn-small" type="button">Untick all</button>
-        <span id="checked-count" class="pill"></span>
-        <label class="small muted"><input type="checkbox" id="toggle-gallery-expand"> expand</label>
+    <!-- ============================================================== TOOLBAR -->
+    <div class="toolbar" role="toolbar">
+      <button type="button" class="tb-btn" data-command="add-images" title="Add images (Ctrl+O)">
+        <svg class="tb-icon" viewBox="0 0 20 20"><rect x="2" y="4" width="13" height="11" rx="1" fill="#fff" stroke="#5a7aa6"/><path d="M3.5 13.5l3.5-4 2.5 2.5 2-2 2.5 3.5z" fill="#4c9a3c"/><circle cx="11" cy="7.3" r="1.3" fill="#f2b632"/><circle cx="15.5" cy="14.5" r="4" fill="#3f8f2f" stroke="#2a6a1d"/><path d="M15.5 12.3v4.4M13.3 14.5h4.4" stroke="#fff" stroke-width="1.6"/></svg>
+        <span>Add Images</span>
+      </button>
+      <button type="button" class="tb-btn" data-command="add-folder" title="Add a whole folder">
+        <svg class="tb-icon" viewBox="0 0 20 20"><path d="M2 5h6l1.5 1.5H18v9.5H2z" fill="#f6d27a" stroke="#b8902c"/><path d="M2 8h16v8H2z" fill="#fbe39f" stroke="#b8902c"/></svg>
+        <span>Add Folder</span>
+      </button>
+      <span class="tb-sep"></span>
+      <button type="button" class="tb-btn" data-command="analyze" title="Batch analysis of all images (Esc)">
+        <svg class="tb-icon" viewBox="0 0 20 20"><rect x="2" y="11" width="3" height="6" fill="#4f8fd6" stroke="#245a99"/><rect x="6.5" y="7" width="3" height="10" fill="#4f8fd6" stroke="#245a99"/><circle cx="13.5" cy="8" r="4" fill="#e6f2ff" fill-opacity=".7" stroke="#334" stroke-width="1.5"/><path d="M16.3 10.8l2.7 2.7" stroke="#334" stroke-width="2.2"/></svg>
+        <span>Analyze</span>
+      </button>
+      <div class="menu tb-menu">
+        <button type="button" class="tb-btn menu-title" aria-haspopup="true" title="Remove metadata (creates new copies, originals are never modified)">
+          <svg class="tb-icon" viewBox="0 0 20 20"><path d="M10 1.5l7 2.5v5c0 4.5-3 7.5-7 9.5-4-2-7-5-7-9.5V4z" fill="#3b8de0" stroke="#1d5397"/><path d="M10 1.5v17c-4-2-7-5-7-9.5V4z" fill="#69adf0"/><path d="M6.5 9.5l2.5 2.5 4.5-5" stroke="#fff" stroke-width="1.8" fill="none"/></svg>
+          <span>Sanitize</span><span class="tb-arrow">▾</span>
+        </button>
+        <div class="menu-dropdown" role="menu">
+          <button type="button" class="menu-item" data-command="sanitize-selected"><span class="mi-check"></span><span class="mi-label">Sanitize Selected Image</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="sanitize-ticked"><span class="mi-check"></span><span class="mi-label">Sanitize Ticked Images</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="sanitize-all"><span class="mi-check"></span><span class="mi-label">Sanitize All Images</span><span class="mi-key"></span></button>
+        </div>
+      </div>
+      <div class="menu tb-menu">
+        <button type="button" class="tb-btn menu-title" aria-haspopup="true" title="Download sanitized copies">
+          <svg class="tb-icon" viewBox="0 0 20 20"><rect x="3" y="2" width="14" height="16" rx="1" fill="#e9eef5" stroke="#5a6f8c"/><rect x="8" y="2" width="4" height="9" fill="#f2c94c" stroke="#a7841f"/><path d="M10 9v7M7 13l3 3 3-3" stroke="#2a6a1d" stroke-width="1.8" fill="none"/></svg>
+          <span>Export</span><span class="tb-arrow">▾</span>
+        </button>
+        <div class="menu-dropdown" role="menu">
+          <button type="button" class="menu-item" data-command="download-selected"><span class="mi-check"></span><span class="mi-label">Sanitized Copy of Selected Image</span><span class="mi-key">Ctrl+S</span></button>
+          <button type="button" class="menu-item" data-command="zip-ticked"><span class="mi-check"></span><span class="mi-label">Ticked Sanitized Images as ZIP</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="zip-all"><span class="mi-check"></span><span class="mi-label">All Sanitized Images as ZIP</span><span class="mi-key"></span></button>
+        </div>
+      </div>
+      <span class="tb-sep"></span>
+      <div class="tb-options" title="Sanitization options (also in the Tools menu)">
+        <label>Mode
+          <select id="sanitize-mode">
+            <option value="reencode" selected>Re-encode (max removal)</option>
+            <option value="lossless">Lossless (exact pixels)</option>
+          </select>
+        </label>
+        <label title="What a sanitized HEIC (iPhone) photo becomes in re-encode mode. Lossless mode always keeps HEIC.">HEIC →
+          <select id="heic-output">
+            <option value="jpeg" selected>JPEG</option>
+            <option value="heic">HEIC</option>
+          </select>
+        </label>
+        <label title="Keeps colour accuracy for wide-gamut photos. The ICC profile can reveal device vendor / profile dates.">
+          <input type="checkbox" id="keep-icc"> Keep ICC
+        </label>
       </div>
     </div>
-    <div class="legend small muted">
-      Badges: <span class="badge b-gps">GPS</span> location
-      <span class="badge b-time">TIME</span> timestamp
-      <span class="badge b-dev">DEV</span> camera/device
-      <span class="badge b-sw">SW</span> software/editor
-      <span class="badge b-auth">AUTH</span> author/copyright
-      <span class="badge b-id">ID</span> serial/unique ID
-      <span class="badge b-emb">THUMB</span> embedded thumbnail
-      <span class="badge b-clean">✔ CLEAN</span> verified sanitized
-      · Keys: <kbd>←</kbd>/<kbd>→</kbd> previous/next, <kbd>Esc</kbd> All Images
-    </div>
-    <div id="gallery" class="gallery"></div>
-  </section>
 
-  <!-- ===================================================================
-       OPSEC ACTION BAR (sanitize + download)
-       =================================================================== -->
-  <section class="card action-bar hidden" id="action-section">
-    <div class="action-group">
-      <strong>OPSEC · Sanitize</strong>
-      <label class="small">Mode
-        <select id="sanitize-mode">
-          <option value="reencode" selected>Re-encode from pixels (max removal)</option>
-          <option value="lossless">Lossless strip via ExifTool (exact pixels)</option>
-        </select>
-      </label>
-      <label class="small" title="What a sanitized HEIC (iPhone) photo becomes in re-encode mode. Lossless mode always keeps HEIC.">HEIC →
-        <select id="heic-output">
-          <option value="jpeg" selected>JPEG (compatible)</option>
-          <option value="heic">keep HEIC</option>
-        </select>
-      </label>
-      <label class="small" title="Keeps colour accuracy for wide-gamut photos. The ICC profile can reveal device vendor / profile dates.">
-        <input type="checkbox" id="keep-icc"> keep ICC colour profile
-      </label>
-      <button id="btn-sanitize-selected" class="btn" type="button" disabled>Sanitize selected image</button>
-      <button id="btn-sanitize-checked" class="btn" type="button" disabled>Sanitize ticked (0)</button>
-      <button id="btn-sanitize-all" class="btn btn-warn" type="button">Sanitize ALL</button>
+    <!-- ============================================================== ADDRESS BAR -->
+    <div class="addressbar">
+      <div class="address-box" id="address-box" aria-label="Location"></div>
+      <div class="search-box">
+        <input id="filter-search" type="search" placeholder="Search images…" autocomplete="off" aria-label="Search filename, device, software, date, author">
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4.5" fill="none" stroke="#5a6f8c" stroke-width="1.6"/><path d="M10 10l4 4" stroke="#5a6f8c" stroke-width="1.8"/></svg>
+      </div>
     </div>
-    <div class="action-group">
-      <strong>Download</strong>
-      <button id="btn-download-selected" class="btn" type="button" disabled>Selected sanitized copy</button>
-      <button id="btn-zip-checked" class="btn" type="button" disabled>Ticked as ZIP</button>
-      <button id="btn-zip-all" class="btn btn-primary" type="button" disabled>All sanitized as ZIP</button>
+
+    {% if not exiftool_version %}
+    <div class="infobar infobar-error">
+      <span class="ib-icon err">✕</span>
+      <span>ExifTool is not installed or not on PATH. Metadata extraction and verification will fail.
+      Install it with <code>sudo apt install libimage-exiftool-perl</code> and restart the server.</span>
     </div>
-    <div id="action-status" class="action-status small"></div>
-  </section>
+    {% endif %}
 
-  <!-- ===================================================================
-       WORKSPACE: left = filters/table/map/correlation, right = inspector
-       =================================================================== -->
-  <div class="workspace hidden" id="workspace">
-    <div class="workspace-left">
+    <!-- ============================================================== CLIENT AREA -->
+    <div class="client" id="client">
 
-      <!-- 4. FILTERS + TABLE -->
-      <section class="card" id="table-section">
-        <div class="card-title-row">
-          <h2><span class="step">4</span> Metadata table</h2>
-          <span id="table-count" class="muted small"></span>
+      <!-- Add Images pane -->
+      <section class="pane" id="upload-section">
+        <div class="pane-header">
+          <span class="pane-title">Add Images</span>
+          <span class="pane-sub">{{ allowed_extensions | join(', ') }} · max {{ max_file_mb }} MB per file · max {{ max_images }} images</span>
         </div>
-        <div class="filters">
-          <input id="filter-search" type="search" placeholder="Search filename, device, software, date, author…" autocomplete="off">
-          <label><input type="checkbox" data-filter="gps"> Has GPS</label>
-          <label><input type="checkbox" data-filter="timestamp"> Has timestamp</label>
-          <label><input type="checkbox" data-filter="device"> Has device</label>
-          <label><input type="checkbox" data-filter="software"> Has software</label>
-          <label><input type="checkbox" data-filter="author"> Has author</label>
-          <label><input type="checkbox" data-filter="unsanitized"> Not yet sanitized</label>
-          <span id="group-filter-chip" class="chip hidden"></span>
-          <button id="btn-clear-filters" class="btn btn-small btn-ghost" type="button">Clear filters</button>
+        <div class="infobar infobar-info" id="privacy-infobar">
+          <span class="ib-icon info">i</span>
+          <span>All image processing happens <strong>locally</strong> on this machine. Images, thumbnails, metadata, filenames and GPS
+          coordinates are never sent to external APIs or AI services. Only OpenStreetMap map tiles are downloaded (can be turned off in View).</span>
         </div>
-        <div class="table-wrap" id="table-wrap">
-          <table class="meta-table" id="meta-table">
-            <thead>
-              <tr>
-                <th class="col-check"><input type="checkbox" id="table-check-all" title="Tick / untick all visible"></th>
-                <th class="col-thumb"></th>
-                <th data-sort="filename">Filename</th>
-                <th data-sort="timestamp">Timestamp</th>
-                <th data-sort="device">Device / camera</th>
-                <th data-sort="software">Software</th>
-                <th data-sort="gps">GPS</th>
-                <th data-sort="pixels">Dimensions</th>
-                <th data-sort="size">Size</th>
-                <th data-sort="sensitivity">Exposure</th>
-                <th data-sort="sanitized">Sanitized</th>
-              </tr>
-            </thead>
-            <tbody id="meta-table-body"></tbody>
-          </table>
+        <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop images or folders here">
+          <svg class="drop-icon" viewBox="0 0 48 48" aria-hidden="true"><path d="M4 12h15l3 3h22v25H4z" fill="#f6d27a" stroke="#b8902c"/><path d="M4 19h40v21H4z" fill="#fbe39f" stroke="#b8902c"/><rect x="14" y="7" width="18" height="15" fill="#fff" stroke="#7d8da3"/><path d="M15.5 20l5-6 3.5 3.5 3-3 3.5 5.5z" fill="#4c9a3c"/></svg>
+          <div class="drop-text">
+            <div><strong>Drag images or whole folders anywhere into this window</strong></div>
+            <div class="muted">JPEG, PNG, WebP, TIFF, HEIC – analysed locally with ExifTool</div>
+          </div>
+          <div class="drop-buttons">
+            <button id="btn-pick-files" class="btn btn-default" type="button">Add Images…</button>
+            <button id="btn-pick-folder" class="btn" type="button">Add Folder…</button>
+          </div>
+          <input id="input-files" type="file" multiple accept=".jpg,.jpeg,.jpe,.png,.webp,.tif,.tiff,.heic,.heif,image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif" hidden>
+          <input id="input-folder" type="file" multiple webkitdirectory hidden>
         </div>
+        <details id="upload-errors" class="infobar infobar-warn upload-errors hidden">
+          <summary><span class="ib-icon warn">!</span> <span id="upload-errors-summary"></span></summary>
+          <ul id="upload-errors-list"></ul>
+        </details>
       </section>
 
-      <!-- 5. MAP + CORRELATION -->
-      <div class="map-correlation">
-        <section class="card" id="map-section">
-          <div class="card-title-row">
-            <h2><span class="step">5</span> GPS map</h2>
-            <div class="map-toolbar small">
-              <button id="btn-map-fit" class="btn btn-small" type="button">Fit all</button>
-              <label title="Connect GPS points of each device in chronological order"><input type="checkbox" id="toggle-map-path"> chronological path</label>
-              <label title="Map tiles are loaded from tile.openstreetmap.org. The tile server can infer which area you are looking at."><input type="checkbox" id="toggle-map-tiles" checked> online map tiles</label>
-            </div>
-          </div>
-          <div class="map-container">
-            <div id="map"></div>
-            <div id="map-empty" class="map-empty hidden">No GPS metadata found in this batch.</div>
-          </div>
-          <div id="map-note" class="small muted"></div>
-        </section>
+      <!-- Batch summary -->
+      <section class="pane hidden" id="summary-section">
+        <div class="pane-header">
+          <span class="pane-title">Batch Summary</span>
+          <span class="pane-sub">Click a tile to filter the workspace</span>
+        </div>
+        <div id="stats-grid" class="stats-grid"></div>
+      </section>
 
-        <section class="card" id="correlation-section">
-          <div class="card-title-row">
-            <h2><span class="step">6</span> Correlation</h2>
-            <span class="muted small">Click a value to filter</span>
+      <div class="workspace hidden" id="workspace">
+        <div class="workspace-left">
+
+          <!-- Thumbnails (Explorer icon view) -->
+          <section class="pane" id="gallery-section">
+            <div class="pane-header">
+              <span class="pane-title">Thumbnails</span>
+              <div class="pane-tools">
+                <button id="btn-all-images" class="btn btn-small btn-all active" type="button" title="Show the whole batch (Esc)">All Images</button>
+                <span id="gallery-count" class="pane-sub"></span>
+                <span id="checked-count" class="pane-sub strong"></span>
+                <button id="btn-check-visible" class="btn btn-small" type="button" title="Tick every visible image">Tick visible</button>
+                <button id="btn-uncheck-all" class="btn btn-small" type="button">Untick all</button>
+                <label class="pane-sub"><input type="checkbox" id="toggle-gallery-expand"> Show all</label>
+              </div>
+            </div>
+            <div class="legend">
+              <span class="badge b-gps">GPS</span> location
+              <span class="badge b-time">TIME</span> timestamp
+              <span class="badge b-dev">DEV</span> camera/device
+              <span class="badge b-sw">SW</span> software
+              <span class="badge b-auth">AUTH</span> author
+              <span class="badge b-id">ID</span> serial/unique ID
+              <span class="badge b-emb">THUMB</span> embedded thumbnail
+              <span class="badge b-clean">✔ CLEAN</span> verified sanitized
+            </div>
+            <div id="gallery" class="gallery" role="listbox" aria-label="Thumbnails"></div>
+          </section>
+
+          <!-- Details list view -->
+          <section class="pane" id="table-section">
+            <div class="pane-header">
+              <span class="pane-title">Details</span>
+              <span id="table-count" class="pane-sub"></span>
+            </div>
+            <div class="filters">
+              <span class="filters-label">Show only:</span>
+              <label><input type="checkbox" data-filter="gps"> GPS</label>
+              <label><input type="checkbox" data-filter="timestamp"> Timestamp</label>
+              <label><input type="checkbox" data-filter="device"> Device</label>
+              <label><input type="checkbox" data-filter="software"> Software</label>
+              <label><input type="checkbox" data-filter="author"> Author</label>
+              <label><input type="checkbox" data-filter="unsanitized"> Not yet sanitized</label>
+              <span id="group-filter-chip" class="chip hidden"></span>
+              <button id="btn-clear-filters" class="btn btn-small" type="button">Clear filters</button>
+            </div>
+            <div class="table-wrap" id="table-wrap">
+              <table class="meta-table" id="meta-table">
+                <thead>
+                  <tr>
+                    <th class="col-check"><input type="checkbox" id="table-check-all" title="Tick / untick all visible"></th>
+                    <th class="col-thumb"></th>
+                    <th data-sort="filename">Name</th>
+                    <th data-sort="timestamp">Date taken</th>
+                    <th data-sort="device">Device / camera</th>
+                    <th data-sort="software">Software</th>
+                    <th data-sort="gps">GPS</th>
+                    <th data-sort="pixels">Dimensions</th>
+                    <th data-sort="size">Size</th>
+                    <th data-sort="sensitivity">Exposure</th>
+                    <th data-sort="sanitized">Sanitized</th>
+                  </tr>
+                </thead>
+                <tbody id="meta-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <div class="map-correlation">
+            <!-- GPS map -->
+            <section class="pane" id="map-section">
+              <div class="pane-header">
+                <span class="pane-title">GPS Locations</span>
+                <div class="pane-tools">
+                  <button id="btn-map-fit" class="btn btn-small" type="button">Fit all</button>
+                  <label class="pane-sub" title="Connect GPS points of each device in chronological order"><input type="checkbox" id="toggle-map-path"> Path</label>
+                  <label class="pane-sub" title="Map tiles are loaded from tile.openstreetmap.org. The tile server can infer which area you are looking at."><input type="checkbox" id="toggle-map-tiles" checked> Online tiles</label>
+                </div>
+              </div>
+              <div class="map-container">
+                <div id="map"></div>
+                <div id="map-empty" class="map-empty hidden">No GPS metadata found in this batch.</div>
+              </div>
+              <div id="map-note" class="pane-footer"></div>
+            </section>
+
+            <!-- Correlation tree -->
+            <section class="pane" id="correlation-section">
+              <div class="pane-header">
+                <span class="pane-title">Correlation</span>
+                <span class="pane-sub">Click a value to filter</span>
+              </div>
+              <div id="correlation" class="correlation tree"></div>
+            </section>
           </div>
-          <div id="correlation" class="correlation"></div>
-        </section>
+        </div>
+
+        <!-- Properties dialog -->
+        <aside class="workspace-right">
+          <section class="properties" id="inspector" aria-live="polite"></section>
+        </aside>
       </div>
     </div>
 
-    <!-- 7. INSPECTOR (detail panel) -->
-    <aside class="workspace-right">
-      <section class="card inspector" id="inspector"></section>
-    </aside>
+    <!-- ============================================================== STATUS BAR -->
+    <footer class="statusbar">
+      <div class="sb-section" id="sb-counts">No images</div>
+      <div class="sb-section sb-grow" id="sb-selection"></div>
+      <div class="sb-section sb-progress hidden" id="upload-progress">
+        <div class="progress-bar"><div id="upload-progress-fill" class="progress-fill"></div></div>
+        <span id="upload-progress-text"></span>
+      </div>
+      <div class="sb-section" title="All processing happens locally">🔒 Local</div>
+      <div class="sb-section">
+        {% if exiftool_version %}ExifTool {{ exiftool_version }}{% else %}<span class="sb-bad">ExifTool missing</span>{% endif %}
+        · {% if heif_available %}HEIC ✓{% else %}<span class="sb-bad" title="pip install pillow-heif">HEIC off</span>{% endif %}
+      </div>
+      <div class="sb-section sb-status" id="action-status">Ready</div>
+    </footer>
   </div>
-</main>
+</div>
+</div>
 
-<footer class="app-footer small muted">
-  Photo Tool · local hackathon prototype · originals are never modified · map data © OpenStreetMap contributors
-</footer>
+<!-- Generic Windows-style dialog (Help / About) -->
+<div class="modal-backdrop hidden" id="dialog-backdrop">
+  <div class="window dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+    <div class="titlebar">
+      <div class="titlebar-text" id="dialog-title"></div>
+      <div class="caption-buttons">
+        <button type="button" class="caption-btn caption-close" id="dialog-close" title="Close">
+          <svg viewBox="0 0 10 10" width="10" height="10"><path d="M1.5 1.5l7 7M8.5 1.5l-7 7" stroke="currentColor" stroke-width="1.8"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="window-body dialog-body">
+      <div class="dialog-content" id="dialog-content"></div>
+      <div class="dialog-buttons"><button type="button" class="btn btn-default" id="dialog-ok">OK</button></div>
+    </div>
+  </div>
+</div>
 
 <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
