@@ -362,6 +362,4 @@ Server logs go to the terminal. Start with `PHOTO_TOOL_DEBUG=1` to also see Exif
 
 ## AI Usage
 
-## AI Usage
-
 Claude was used extensively for implementation and debugging. I defined the project idea, OSINT/OPSEC workflow, feature requirements, interaction design, security requirements, and testing criteria, then used Claude to implement and iterate on them. I manually tested the application and independently verified metadata sanitization with ExifTool.
