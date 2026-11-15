@@ -360,7 +360,6 @@ Server logs go to the terminal. Start with `PHOTO_TOOL_DEBUG=1` to also see Exif
 * **Single user:** the workspace is in memory and is lost on restart. There is no authentication, so do not expose the tool on a network.
 * The sensitivity rules use tag names. Vendor maker notes are flagged as one category rather than parsed one by one.
 
-## AI Usage
 
 ## AI Usage
 
