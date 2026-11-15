@@ -129,8 +129,7 @@ selectImage(id, source)
 
 Each map marker stores its image ID (`marker.imageId`), and `mapState.markers` maps ID to marker. Filters work the same way: change `state.filters`, then call `renderAll()`, so the gallery, table and map always show the same set of images.
 
-### User interface (Windows 7–style desktop utility)
-The page is laid out like a Windows 7 application window:
+### User interface 
 
 | Area | What it is | Where in the code |
 |---|---|---|
