@@ -3,7 +3,8 @@
 **A batch-first photo metadata investigation and sanitization workspace.**
 
 <img width="2877" height="1484" alt="image" src="https://github.com/user-attachments/assets/4b2ee2f3-ed25-4e0c-8fb9-1f075c37d233" />
-<img width="2877" height="1488" alt="image" src="https://github.com/user-attachments/assets/0e2cb711-e2ea-48da-af2b-2dabd91d8bed" />
+<img width="2879" height="1485" alt="Screenshot_20261114_203537" src="https://github.com/user-attachments/assets/cc23be23-ccf6-495f-a6cf-a2c711026063" />
+
 
 
 ## Why I built this
