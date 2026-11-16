@@ -16,6 +16,8 @@ API overview (all JSON unless noted):
     POST /api/upload                    multipart "files" (several) -> new images + per-file errors
     GET  /api/images                    summaries of all images (no raw metadata)
     GET  /api/images/<id>               full detail incl. raw metadata + sanitization result
+    GET  /api/location-analysis         ambiguous-GPS investigation: derived candidates +
+                                        contextual evidence (computed on demand, cached)
     GET  /images/<id>/thumb             thumbnail JPEG
     GET  /images/<id>/preview           preview JPEG (max 1600 px)
     POST /api/sanitize                  {"ids": [...]} or {"all": true}, "mode", "keep_icc", "heic_output"
@@ -31,6 +33,7 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 
 from photo_tool import config
 from photo_tool import heif_support
+from photo_tool import location_analysis, timezones
 from photo_tool.downloads import build_sanitized_zip
 from photo_tool.metadata import analyze_metadata, exiftool_version, read_metadata_batch
 from photo_tool.sanitize import SANITIZE_MODES, sanitize_images
@@ -170,6 +173,7 @@ def api_status():
         "sanitize_modes": list(SANITIZE_MODES),
         "heif_available": heif_support.HEIF_AVAILABLE,
         "heic_output_choices": list(config.HEIC_OUTPUT_CHOICES),
+        "timezone_lookup": timezones.get_lookup().info(),
     })
 
 
@@ -235,6 +239,26 @@ def api_images():
 @app.get("/api/images/<image_id>")
 def api_image_detail(image_id):
     return jsonify(get_record_or_404(image_id).to_detail())
+
+
+# Cache of the last location analysis: (workspace revision, lookup name) -> result.
+# Only computed when the investigator asks for it (Location tab / "Show possible
+# locations"), so normal metadata extraction pays nothing for this feature.
+_location_cache = {"key": None, "result": None}
+
+
+@app.get("/api/location-analysis")
+def api_location_analysis():
+    """
+    Derived candidates + contextual evidence for every image with AMBIGUOUS GPS.
+    A separate document on purpose: it never changes image summaries, gps_status,
+    flags.gps or any resolved-GPS count.
+    """
+    key = (workspace.revision, timezones.get_lookup().name)
+    if _location_cache["key"] != key:
+        _location_cache["result"] = location_analysis.analyze_collection(workspace.all())
+        _location_cache["key"] = key
+    return jsonify(_location_cache["result"])
 
 
 @app.get("/images/<image_id>/thumb")

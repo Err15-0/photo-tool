@@ -88,6 +88,16 @@ HEIF_SANITIZE_QUALITY = 90     # re-encode quality when HEIC output stays HEIC
 HEIC_OUTPUT_CHOICES = ("jpeg", "heic")
 DEFAULT_HEIC_OUTPUT = "jpeg"
 
+# --- Location investigation (derived candidates + contextual evidence) -------------
+# A resolved photo counts as SUPPORTING context for a candidate when it comes from
+# the same device model, was taken within this many hours, and its resolved location
+# is within this distance of the candidate. Shown in the UI next to every result.
+CONTEXT_TIME_WINDOW_HOURS = 6
+CONTEXT_DISTANCE_KM = 50
+# Same device model, close in time, but implying travel faster than this -> listed as
+# a CONFLICT (physically implausible if it is the same camera).
+CONTEXT_MAX_PLAUSIBLE_SPEED_KMH = 1000
+
 # --- ExifTool ----------------------------------------------------------------------
 EXIFTOOL_BINARY = os.environ.get("PHOTO_TOOL_EXIFTOOL", "exiftool")
 EXIFTOOL_TIMEOUT_SECONDS = 180
