@@ -1,0 +1,10 @@
+# OPTIONAL: offline timezone support for ambiguous-GPS candidate analysis.
+# Install on top of the normal requirements:
+#     pip install -r requirements.txt -r requirements-timezone.txt
+#
+# tzfpy maps a coordinate to IANA timezone NAMES, fully offline (boundary data is
+# compiled into the package, ~3 MB wheel, precompiled for Linux/macOS/Windows,
+# Python >= 3.10). UTC offsets / DST history still come from Python's zoneinfo.
+# Code: MIT. Boundary data: timezone-boundary-builder / OpenStreetMap contributors,
+# Open Database License (ODbL) 1.0 - see README "Timezone boundary data".
+tzfpy>=2.1.2,<3

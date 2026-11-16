@@ -220,36 +220,80 @@ For each candidate, Photo Tool can compare the UTC offset recorded in the image 
 * **Recorded offset:** `OffsetTimeOriginal` paired with `DateTimeOriginal`. Fallbacks are `OffsetTimeDigitized`/`CreateDate`, then `OffsetTime`/`ModifyDate` (labelled as modification time), then XMP dates that contain an offset. Malformed offsets such as `+25:00` are reported and ignored, never repaired.
 * **Offset at the candidate:** the IANA rules from Python's `zoneinfo` and the operating system's tz database. This includes DST and historical changes (US rules before and after 2007, Moscow 2011/2014). If the capture time falls in the repeated hour when clocks go back, both offsets count.
 * **Labels:** only **Timezone consistent**, **Timezone inconsistent** or **Timezone unknown**. Never "confirmed" or "correct".
-* **Open ocean:** only nautical zones exist there (`Etc/GMT+5`), so the result is *unknown*. Otherwise the Pacific mirror of the CTF example (`Etc/GMT+5` = UTC−05:00) would look "consistent".
+* **Open ocean / poles:** only nautical zones exist there (`Etc/GMT+5`, `Etc/GMT`), so the result is *unknown* and is not used as evidence. Otherwise the Pacific mirror of the CTF example (`Etc/GMT+5` = UTC−05:00) would look "consistent".
+* **Several local times at one place:** some regions officially or commonly use more than one local time. The boundary data then lists every zone that applies. The recorded offset is compared with each of them, and the result says so ("More than one local time is in use at this location …").
 * **No hemisphere from the sign:** the sign of an offset is never used to guess a hemisphere.
 
 **Why timezone does not prove location:** one offset covers a whole band of longitude, and both hemispheres share it. Cameras are also often set to the wrong timezone, or still on home time while travelling. *Timezone consistency is contextual evidence and does not confirm the location.*
 
-**Current state:** looking up which timezone a *coordinate* lies in needs timezone **boundary** data. Photo Tool does **not** ship boundary data yet and never asks an online service, so the timezone result is currently always *"Timezone unknown – offline timezone boundary data is not installed"*. The comparison engine is implemented and tested (with a test-only lookup). Adding an offline boundary source is a pending decision; see the options in the pull request. `photo_tool/timezones.py → TimezoneLookup` is the plug-in point.
+#### Optional offline timezone lookup (tzfpy)
+Finding which timezone a *coordinate* lies in needs timezone **boundary** data. Photo Tool keeps this **optional**:
+
+| | Without `tzfpy` (default install) | With `tzfpy` (`pip install -r requirements-timezone.txt`) |
+|---|---|---|
+| Coordinate → zone name | not available | `tzfpy.get_tzs()`: all IANA zones at that point |
+| UTC offset at capture time | – | always Python `zoneinfo` + OS tz database (DST, history) |
+| Timezone evidence | always **Timezone unknown** with an install hint | consistent / inconsistent / unknown |
+| Network | none | none: the boundary data is compiled into the package |
+| Size | – | 2.9 MB wheel, ~5 MB installed, precompiled for Linux/macOS/Windows (Python ≥ 3.10) |
+
+* **Selection:** Photo Tool uses tzfpy automatically when it is installed. Set `PHOTO_TOOL_TIMEZONE_LOOKUP=off` to disable it.
+* **Where to see it:** the active backend is shown in Help → About, in `/api/status` and in every Location tab.
+* **No network:** verified by a unit test that blocks all sockets, and by running the analysis under `unshare -n` and `strace` (no `connect`/`send` calls at all).
+* **Cost:** loading the boundary data takes about 50 ms once, at startup. A lookup takes about 1 µs.
+* **Updates:** `pip install -U tzfpy` updates the boundaries. The DST rules come from the operating system's tz database (`sudo apt upgrade tzdata` on Debian).
+
+**Known differences between boundary datasets – Xinjiang:** in Xinjiang (China), both Beijing time (UTC+8, `Asia/Shanghai`) and Xinjiang time (UTC+6, `Asia/Urumqi`) are in everyday use. tzfpy reports **both** zones there (`get_tzs` → `['Asia/Shanghai', 'Asia/Urumqi']`), so a photo recording either +08:00 or +06:00 is "consistent". In Beijing only `Asia/Shanghai` applies. The single-zone call `get_tz` and other libraries (e.g. timezonefinder) return only one of the two zones, which can make a correct candidate look "inconsistent". This is one more reason why timezone evidence never resolves a location. The CTF example's N/E mirror lies in Xinjiang.
+
+#### Timezone boundary data – attribution (ODbL)
+When the optional tzfpy package is installed, timezone boundaries come from **[timezone-boundary-builder](https://github.com/evansiroky/timezone-boundary-builder)** by Evan Siroky. That data is derived from **© OpenStreetMap contributors** and is available under the **[Open Database License (ODbL) 1.0](https://opendatacommons.org/licenses/odbl/1-0/)**. It is packaged and simplified by **[tzf / tzfpy](https://github.com/ringsaturn/tzfpy)** (ringsaturn; code under the MIT licence; boundaries simplified to within ~111 m of the original borders). Photo Tool does not bundle or modify this data; it is installed separately with `pip`. The attribution is also shown in Help → About and next to timezone evidence.
 
 #### Collection context
 For each candidate, Photo Tool looks at the photos in the batch that **do** have resolved GPS:
-* **Support:** a resolved photo from the **same device model** (or same serial number), taken within **6 h**, whose location is within **50 km** of the candidate. Example: *"A photo from the same device model taken 2 minutes earlier (UTC) has a resolved location 1.1 km from this candidate."*
-* **Conflict:** a same-device photo within 6 h that would require travelling faster than **1,000 km/h** to reach this candidate. Example: *"… 11,116 km from this candidate (implied travel: 351,023 km/h – implausible if it is the same camera)."*
+* **Support:** a resolved photo from the **same device model** (or with the same recorded serial number), taken within **6 h**, whose location is within **50 km** of the candidate. Example: *"A photo from the same device model (not necessarily the same physical device) taken 2 minutes earlier (UTC) has a resolved location 1.1 km from this candidate."*
+* **Conflict:** a same-model photo within 6 h that would require travelling faster than **1,000 km/h** to reach this candidate. Example: *"… 11,116 km from this candidate (implied travel: 351,023 km/h – implausible only if both photos come from the same physical camera)."*
 * **Weak context:** the closest resolved photo of *any* device is shown, but labelled *"different/unknown device – no device relationship, weak context"*.
 * **Time differences:** compared in UTC when both photos record an offset, otherwise on the local clock (and labelled that way).
 * **Limits:** at most 5 statements are written out per candidate, but every match is counted.
 
-The thresholds are in `photo_tool/config.py` (`CONTEXT_*`) and are shown next to the results. "Same device" means the same make/model string, which can be a different physical camera.
+The thresholds are in `photo_tool/config.py` (`CONTEXT_*`) and are shown next to the results.
+
+**Same device model ≠ same physical device.** Photos are related by their make/model string ("Apple iPhone 12"); millions of phones share that string. Every statement says *"same device model (not necessarily the same physical device)"*. A matching recorded **serial number** is described as *"same recorded camera serial number"*, with the caveat that metadata can be copied, so it is not proof of the same physical camera either.
 
 **Patterns across ambiguous images:** e.g. *"5 image(s) from Apple iPhone 12 have ambiguous GPS with the same pattern: GPSLatitudeRef missing + GPSLongitudeRef missing."* This can reveal how the metadata was processed or damaged. Sharing a pattern does **not** mean the images share a hemisphere.
 
-**No ranking:** candidates are not ranked or given percentages, because there is no statistical model that could back such numbers. Each candidate lists its supporting and conflicting signals, and nothing is hidden.
+#### Evidence categories and evidence-based ordering (no scores)
+Each candidate's contextual evidence is sorted into four categories:
+
+| Category | Examples | Affects the order? |
+|---|---|---|
+| **Supporting** | timezone consistent; a same-model photo ≤ 6 h and ≤ 50 km away | yes |
+| **Conflicting** | timezone inconsistent; a same-model photo implying > 1,000 km/h travel | yes |
+| **Weak** | nearest resolved photo is from a *different/unknown* device; same-model photos exist but none within 6 h | no |
+| **Unavailable** | timezone unknown (no backend, ocean, no offset/timestamp); no resolved photos in the collection | no |
+
+Candidates are then ordered by a **fixed, visible rule**. There are no scores, weights, percentages or probabilities:
+1. **Most contextually supported:** supporting evidence and no conflicting evidence
+2. **No contextual evidence either way**
+3. **Mixed contextual evidence:** both supporting and conflicting
+4. **Only conflicting contextual evidence**
+
+Within a group the generated order (N/E, N/W, S/E, S/W) is kept, so nothing is decided by hidden tie-breaks.
+* **Always visible:** every geometrically possible candidate stays in the list and on the map.
+* **Explained:** every card shows its position, its group and "Why here", plus a note when several candidates tie.
+* **Never a conclusion:** the first candidate is labelled *"Most contextually supported · inference"*, never "correct", "confirmed" or "resolved". The photo itself stays `ambiguous`.
+
+For the CTF collection with tzfpy installed, the order is: N/W (timezone consistent + same-model photos 1.1 km away), then N/E (timezone inconsistent + implausible travel), then the two ocean candidates (implausible travel; their timezone is *unavailable* and is not used as evidence).
 
 #### Privacy, network and performance
-* **Network:** no new requests. The analysis uses only the local metadata and the local tz database. Coordinates, timestamps, filenames and images are never sent anywhere. One caveat: with **online map tiles** on, *viewing* candidates on the map downloads OpenStreetMap tiles for those areas, including the true one. Turn tiles off (View menu) for sensitive cases.
-* **Performance:** the analysis runs **only on demand** (Location tab or "Show possible locations"). It is computed in one pass over the collection and cached until the workspace changes. Normal extraction only gained the capture-time parsing, about 7 µs per image. Measured with `python tools/benchmark_location.py`:
+* **Network:** no new requests, with or without tzfpy. The analysis uses only the local metadata, the local tz database and (optionally) the boundary data inside the installed tzfpy package. Coordinates, timestamps, filenames and images are never sent anywhere. One caveat: with **online map tiles** on, *viewing* candidates on the map downloads OpenStreetMap tiles for those areas, including the true one. Turn tiles off (View menu) for sensitive cases.
+* **Performance:** the analysis runs **only on demand** (Location tab or "Show possible locations"). It is computed in one pass over the collection and cached until the workspace changes. Normal extraction only gained the capture-time parsing, about 8 µs per image. tzfpy lookups add no measurable time. Measured with `python tools/benchmark_location.py`, which measures both lookups when tzfpy is installed:
 
-| Images | ExifTool processes | On-demand analysis |
+| Images | ExifTool processes | On-demand analysis (without / with tzfpy) |
 |---|---|---|
-| 10 | 2 | < 3 ms |
-| 100 | 2 | 4–10 ms |
-| 1,000 | 20 (batches of 100 × 2) | 0.16 s (100 ambiguous) – 0.46 s (500 ambiguous × 500 resolved) |
+| 10 | 2 | < 10 ms |
+| 100 | 2 | 4–17 ms |
+| 1,000 | 20 (batches of 100 × 2) | 0.19–0.26 s (100 ambiguous) · 0.59–0.66 s (500 ambiguous × 500 resolved) |
 
 ### How sanitization works (`photo_tool/sanitize.py`)
 | Mode | What happens | Pixels |
@@ -283,6 +327,7 @@ The directory is deleted when the server exits (`atexit`), and also when you cli
 ### Dependencies
 * **System:** Python 3.9 or newer, `python3-venv`, ExifTool (`libimage-exiftool-perl`)
 * **Python:** Flask, Pillow and pillow-heif (`requirements.txt`). Pillow wheels already include libjpeg, libpng, libwebp and libtiff, and pillow-heif wheels include libheif, so no `-dev` packages are needed.
+* **Optional:** `tzfpy` (`requirements-timezone.txt`) for offline coordinate → timezone lookup in the ambiguous-GPS investigation. The app works without it (timezone evidence = "unknown"). Its boundary data is ODbL-licensed; see *Timezone boundary data – attribution*.
 * **Frontend:** Leaflet 1.9.4, **bundled** in `static/vendor/leaflet/` (no CDN). No npm and no build step.
 
 ### Debian-specific notes
@@ -299,6 +344,7 @@ The directory is deleted when the server exits (`atexit`), and also when you cli
 photo-tool/
 ├── app.py                     Flask app: routes, security headers, startup
 ├── requirements.txt
+├── requirements-timezone.txt  OPTIONAL: tzfpy (offline coordinate → timezone; ODbL data)
 ├── README.md
 ├── photo_tool/
 │   ├── __init__.py
@@ -321,7 +367,8 @@ photo-tool/
 │   └── vendor/leaflet/        bundled Leaflet 1.9.4 (BSD-2 licence)
 ├── tests/
 │   ├── test_gps.py            GPS hemisphere regression tests (unittest)
-│   └── test_location_analysis.py  candidates, timezone, collection context, API invariants
+│   ├── test_location_analysis.py  candidates, timezone, ordering, collection context, API invariants
+│   └── browser/ui_checks.js   optional Playwright checks (UI, candidate separation, filename injection)
 └── tools/
     ├── make_test_images.py    generates a demo/test batch with fake metadata
     ├── smoke_test.py          automated end-to-end test (no browser needed)
@@ -358,6 +405,10 @@ pip install --upgrade pip
 ```
 ```bash
 pip install -r requirements.txt
+```
+Optional: offline timezone evidence for ambiguous GPS (~3 MB, no network use at runtime):
+```bash
+pip install -r requirements-timezone.txt
 ```
 
 ## 4. Run
@@ -398,16 +449,24 @@ Automated end-to-end check (upload, both sanitize modes, verification, ZIP, orig
 python tools/smoke_test.py
 ```
 
-Regression tests (63):
+Regression tests (79):
 * **GPS:** N/E, N/W, S/E, S/W, missing and malformed references, XMP with and without hemisphere letters, no GPS
 * **Candidates:** 2 or 4 candidates, zero-axis deduplication, 0,0, incomplete pairs
 * **Timezone:** consistent, inconsistent, DST, historical offsets, repeated hour, ocean zones, missing or malformed offset, missing timestamp
-* **Collection context:** same device, unrelated device, patterns
+* **Collection context:** same device model vs physical device, unrelated device, patterns
+* **Ordering:** groups, stable order, ties, nothing hidden, no score/percentage fields, no "correct/confirmed/resolved" wording
+* **Optional tzfpy backend:** real boundaries, Xinjiang's two local times, oceans, DST, and lookups in an interpreter where every socket call raises. These 5 tests are skipped when tzfpy is not installed.
+* **Frontend guard:** Leaflet popups/tooltips never receive strings, and `innerHTML` is only used with constants
 * **Invariants:** context never promotes to `valid`, candidates never enter the resolved dataset or counts, sanitization unchanged
 
-The ExifTool-based tests are skipped automatically if ExifTool is not installed.
+The ExifTool-based tests are skipped automatically if ExifTool is not installed. Run the suite once without and once with `requirements-timezone.txt` to cover both states.
 ```bash
 python -m unittest discover -s tests -v
+```
+
+Optional browser checks (Node.js + Playwright with Chromium). They need a running server with an empty workspace and the sample images, adapt to whether tzfpy is active, and include the filename-injection regression:
+```bash
+node tests/browser/ui_checks.js sample_images http://127.0.0.1:5000
 ```
 
 Performance check for collections of 10, 100 and 1,000 images:
@@ -519,7 +578,10 @@ Server logs go to the terminal. Start with `PHOTO_TOOL_DEBUG=1` to also see Exif
 * Binds to `127.0.0.1` only. The `Host` header is checked to block DNS-rebinding attacks.
 * State-changing API calls need a custom `X-Photo-Tool` header, which other websites cannot send without a CORS preflight (blocks CSRF).
 * Strict Content-Security-Policy: no inline scripts; images only from self and the OSM tile server. Also `nosniff` and `frame-ancestors 'none'`.
-* Every metadata value and filename is rendered with `textContent`, never `innerHTML`, so a malicious EXIF string cannot inject HTML or JavaScript. Map tooltips and popups get DOM nodes, never strings: Leaflet inserts *string* content as HTML. Candidate marker icons contain only a constant "?".
+* **Rendering of untrusted text** (metadata values, filenames). In Photo Tool's own UI code (`static/js/app.js`), this text is inserted only as text nodes: the `h()` helper uses `createTextNode`/`textContent`. The only places where `app.js` sets HTML are constant strings that contain no data: the static SVG shield icons (`ICONS`) and the "?" inside candidate markers.
+  * **Leaflet:** Leaflet renders **string** popup/tooltip content as HTML (`innerHTML`). Photo Tool therefore always passes popups and tooltips a **DOM node** or a function that returns one. Earlier versions passed filenames as strings, so a file named `<img src=x id=pwn>.jpg` was inserted as markup in map tooltips. The CSP blocked script execution, but HTML injection was possible. This is fixed.
+  * **Regression checks:** a static unit test (`FrontendRenderingGuardTests`) fails if a Leaflet content call receives anything other than `h(...)` or `() =>`, or if `innerHTML` is assigned something other than a constant. The browser check (`tests/browser/ui_checks.js`) uploads `<img src=x id=pwn>.jpg` and confirms it appears only as text.
+  * **Scope:** this covers Photo Tool's code. Third-party Leaflet controls (zoom, attribution) only show constant text.
 * File paths are built only from the server-generated random ID and a canonical extension. The user's filename never touches the filesystem. Download names go through `secure_filename`.
 * The file type comes from the content (magic bytes via Pillow), not the extension. Every image is fully decoded at upload, and decompression bombs are refused (`MAX_IMAGE_PIXELS`).
 * Limits on file size, files per request, request size and total images.
@@ -539,8 +601,8 @@ Server logs go to the terminal. Start with `PHOTO_TOOL_DEBUG=1` to also see Exif
 * The sensitivity rules use tag names. Vendor maker notes are flagged as one category rather than parsed one by one.
 * **GPS altitude:** a missing `GPSAltitudeRef` is read as "above sea level", which is the EXIF default. Latitude/longitude are never defaulted.
 * **GPS sources:** only EXIF and XMP GPS coordinates are interpreted. Video-style QuickTime `GPSCoordinates` are not used for the map.
-* **Timezone consistency:** without an offline timezone boundary source every result is "Timezone unknown" (see the GPS investigation section). Even with one, timezone only narrows candidates: cameras are often set to the wrong or home timezone.
-* **Collection context:** "same device" means the same make/model string (or serial number when recorded). Two people with the same phone model look related. The thresholds (6 h, 50 km, 1,000 km/h) are simple, documented rules, not statistics.
+* **Timezone consistency:** without the optional tzfpy package every result is "Timezone unknown". With it, timezone only narrows candidates: cameras are often set to the wrong or home timezone, one offset covers a wide band of longitude, and boundary data can differ near borders (~111 m simplification) or for regions with two local times (Xinjiang, see above).
+* **Collection context:** related photos share a device *model* string (or a recorded serial number). That is not proof of the same physical device: two people with the same phone model look related. The thresholds (6 h, 50 km, 1,000 km/h) and the ordering rule are simple, documented rules, not statistics.
 * **GPSDateStamp/GPSTimeStamp** (UTC) are not yet used to derive a capture offset.
 
 

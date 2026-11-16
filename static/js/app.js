@@ -787,6 +787,7 @@ function buildCandidatePopup(image, candidate) {
     h("div", null,
       h("div", { class: "popup-name" }, candidate.label),
       h("div", { class: "derived-warning" }, "⚠ ", state.locationAnalysis.disclaimers.candidates),
+      h("div", { class: "popup-line" }, `Order #${candidate.order.position} of ${image.candidates.length}: ${candidate.order.label}${candidate.order.group === 1 ? " (inference, not confirmation)" : ""}`),
       h("div", { class: "popup-line mono" }, candidate.display),
       h("div", { class: "popup-line" }, `From: ${image.filename}`),
       h("div", { class: "popup-line" }, `Latitude: ${candidate.latitude_basis}`),
@@ -935,12 +936,17 @@ function buildCandidateCard(image, candidate, analysis) {
     ` – ${label}`) : null;
   const tm = coll.closest_temporal_match;
   const gm = coll.closest_geographic_match;
-  return h("div", { class: `candidate-card ${a.has_contextual_support ? "has-support" : ""}` },
+  const order = candidate.order || {};
+  return h("div", { class: `candidate-card ${a.has_contextual_support ? "has-support" : ""} order-group-${order.group}` },
     h("div", { class: "candidate-head" },
+      h("span", { class: "order-pos", title: "Position in the evidence-based order (not a score)" }, `#${order.position}`),
       h("span", { class: "candidate-dot", "aria-hidden": "true" }, "?"),
       h("strong", null, candidate.label),
       h("span", { class: "mono" }, candidate.display),
       h("button", { type: "button", class: "btn btn-small", onclick: () => showCandidateOnMap(image.id, candidate.id) }, "Show on map")),
+    h("div", { class: "order-line" },
+      h("span", { class: `order-badge og-${order.group}` }, order.label, order.group === 1 ? " · inference" : ""),
+      h("span", { class: "small" }, ` Why here: ${order.reason}`)),
     evidenceBlock("raw", "Metadata evidence", kvTable([
       ["Latitude", candidate.latitude_basis],
       ["Longitude", candidate.longitude_basis],
@@ -951,13 +957,15 @@ function buildCandidateCard(image, candidate, analysis) {
       ["Candidate timezone", tz.timezone],
       ["Candidate offset at capture time", tz.candidate_offsets.length ? tz.candidate_offsets.map((o) => `UTC${o}`).join(" / ") : null],
       ["Status", tzPill(tz.status)],
+      ["Zones at this point", tz.zones && tz.zones.length > 1 ? tz.zones.map((z) => `${z.timezone} (UTC${z.offsets.join("/")})`).join(", ") : null],
       ["Why unknown", tz.status === "unknown" ? tz.reason : null],
       ["Note", tz.note],
-    ]), h("div", { class: "ev-disclaimer" }, analysis.disclaimers.timezone)),
+    ]), h("div", { class: "ev-disclaimer" }, analysis.disclaimers.timezone),
+      tz.attribution && tz.timezones && tz.timezones.length ? h("div", { class: "attribution" }, tz.attribution) : null),
     evidenceBlock("context", "Collection evidence",
       kvTable([
-        [`Same-device resolved photos ≤ ${analysis.rules.context_time_window_hours} h and ≤ ${analysis.rules.context_distance_km} km`, String(coll.same_device_resolved_near)],
-        ["Closest same-device photo in time", tm ? relatedRow(tm, `${describeMinutes(tm.relationship.time_delta_minutes)}, ${tm.distance_km.toLocaleString()} km from this candidate`) : null],
+        [`Same-device-MODEL resolved photos ≤ ${analysis.rules.context_time_window_hours} h and ≤ ${analysis.rules.context_distance_km} km`, String(coll.same_device_resolved_near)],
+        ["Closest same-device-model photo in time", tm ? relatedRow(tm, `${describeMinutes(tm.relationship.time_delta_minutes)}, ${tm.distance_km.toLocaleString()} km from this candidate${tm.relationship.same_serial ? " (same recorded serial number)" : ""}`) : null],
         ["Closest resolved photo (any device)", gm ? relatedRow(gm, `${gm.distance_km.toLocaleString()} km, ${gm.relationship.same_device_model ? "same device model" : "different/unknown device"}`) : null],
       ]),
       coll.supporting.length ? h("ul", { class: "ev-list support" }, coll.supporting.map((s) => h("li", null, s.statement))) : null,
@@ -966,8 +974,24 @@ function buildCandidateCard(image, candidate, analysis) {
       h("div", { class: "ev-disclaimer" }, analysis.disclaimers.collection)),
     h("div", { class: "assessment" },
       h("strong", null, "Assessment: "), "Derived candidate · Not confirmed",
-      a.supporting_signals.length ? h("div", null, "Contextual support: ", a.supporting_signals.join(", ")) : h("div", { class: "muted" }, "No contextual support found."),
-      a.conflicting_signals.length ? h("div", null, "Conflicting context: ", a.conflicting_signals.join(", ")) : null));
+      evidenceSummary(candidate.evidence || [])));
+}
+
+const EVIDENCE_CATEGORIES = [
+  ["supporting", "+", "Supporting"],
+  ["conflicting", "−", "Conflicting"],
+  ["weak", "~", "Weak (not used for ordering)"],
+  ["unavailable", "?", "Unavailable (not used for ordering)"],
+];
+
+/** All contextual evidence of one candidate, grouped by category. */
+function evidenceSummary(evidence) {
+  return h("div", { class: "evidence-summary" }, EVIDENCE_CATEGORIES.map(([category, sign, label]) => {
+    const items = evidence.filter((e) => e.category === category);
+    return h("div", { class: `ev-cat ev-cat-${category}` },
+      h("span", { class: "ev-cat-label" }, h("span", { class: "ev-sign" }, sign), ` ${label} (${items.length})`),
+      items.length ? h("ul", null, items.map((e) => h("li", null, h("span", { class: "ev-src" }, `${e.source}: `), e.text))) : null);
+  }));
 }
 
 function describeMinutes(minutes) {
@@ -1032,7 +1056,11 @@ function buildLocationTab(img, detail) {
         h("div", { class: "inline-actions" },
           h("label", null, h("input", { type: "checkbox", checked: state.showCandidates, onchange: (e) => setShowCandidates(e.target.checked) }), "Show possible locations on the map")),
         image.pattern ? h("div", { class: "pattern-note" }, image.pattern.statement, " ", h("span", { class: "muted" }, image.pattern.disclaimer)) : null,
-        !analysis.timezone_lookup.available ? h("div", { class: "muted small" }, "Timezone: ", analysis.timezone_lookup.description) : null),
+        h("div", { class: "muted small" }, "Timezone lookup: ", analysis.timezone_lookup.description)),
+      evidenceBlock("context", "Order of the candidates",
+        h("p", { class: "small" }, image.ordering.rule),
+        h("p", { class: "small" }, h("strong", null, image.ordering.note)),
+        h("div", { class: "ev-disclaimer" }, "The order is an inference from the available contextual evidence. It never changes the GPS status: the photo stays ambiguous and no candidate is confirmed.")),
       ...image.candidates.map((candidate) => buildCandidateCard(image, candidate, analysis)));
   };
   loadLocationAnalysis()
@@ -1058,7 +1086,7 @@ function buildOverviewLocationTab() {
     h("label", null, h("input", { type: "checkbox", checked: state.showCandidates, onchange: (e) => setShowCandidates(e.target.checked) }), "Show possible locations on the map")), holder);
   loadLocationAnalysis().then((analysis) => {
     const rows = Object.values(analysis.images).map((image) => {
-      const supported = image.candidates.filter((c) => c.assessment.has_contextual_support).map((c) => c.id);
+      const supported = image.ordering.most_supported;
       return h("tr", null,
         h("td", null, h("a", { href: "#", onclick: (e) => { e.preventDefault(); state.propertiesTab = "location"; selectImage(image.id, "inspector"); } }, image.filename)),
         h("td", null, String(image.candidates.length)),
@@ -1068,7 +1096,7 @@ function buildOverviewLocationTab() {
       evidenceBlock("derived", `${analysis.counts.candidates} possible location(s) for ${analysis.counts.ambiguous_images} image(s)`,
         h("div", { class: "derived-warning" }, "⚠ ", analysis.disclaimers.candidates),
         h("table", { class: "compare" },
-          h("thead", null, h("tr", null, h("th", null, "Image"), h("th", null, "Candidates"), h("th", null, "With contextual support"))),
+          h("thead", null, h("tr", null, h("th", null, "Image"), h("th", null, "Candidates"), h("th", null, "Most contextually supported (inference)"))),
           h("tbody", null, rows))),
       analysis.patterns.length ? evidenceBlock("context", "Collection patterns",
         h("ul", { class: "ev-list" }, analysis.patterns.map((p) => h("li", null, p.statement,
@@ -1561,6 +1589,8 @@ function showAboutDialog() {
       h("tr", null, h("td", null, "HEIC / HEIF"), h("td", null, status.heif_available ? "enabled (pillow-heif)" : "disabled – pip install pillow-heif")),
       h("tr", null, h("td", null, "Formats"), h("td", null, (status.allowed_extensions || ALLOWED_EXTENSIONS).join(", "))),
       h("tr", null, h("td", null, "Limits"), h("td", null, `${Math.round((status.max_file_size || 0) / 1048576)} MB per file, ${status.max_images || "?"} images`)),
+      h("tr", null, h("td", null, "Timezone lookup"), h("td", null, (status.timezone_lookup || {}).description || "unknown")),
+      (status.timezone_lookup || {}).attribution ? h("tr", null, h("td", null, "Timezone data"), h("td", null, status.timezone_lookup.attribution)) : null,
       h("tr", null, h("td", null, "Map"), h("td", null, "Leaflet · © OpenStreetMap contributors")))),
   ]);
 }

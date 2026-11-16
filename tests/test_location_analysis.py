@@ -263,12 +263,44 @@ class TimezoneConsistencyTests(unittest.TestCase):
         self.assertEqual(r["status"], "unknown")
         self.assertIn("nautical", r["reason"])
 
-    def test_default_lookup_is_offline_unknown(self):
-        self.assertFalse(timezones.get_lookup().available)
+    def test_without_optional_backend_everything_is_unknown(self):
         raw = {"EXIF:ExifIFD:DateTimeOriginal": "2021:11:20 07:36:35", "EXIF:ExifIFD:OffsetTimeOriginal": "-05:00"}
-        r = timezones.evaluate(CTF_LAT, -CTF_LON, capture_time.extract_capture_time(raw))
+        r = timezones.evaluate(CTF_LAT, -CTF_LON, capture_time.extract_capture_time(raw), timezones.UnavailableLookup())
         self.assertEqual(r["status"], "unknown")
         self.assertIn("not installed", r["reason"])
+        self.assertIn("requirements-timezone.txt", r["reason"])
+
+    def test_default_backend_matches_installation(self):
+        try:
+            import tzfpy  # noqa: F401
+            installed = True
+        except ImportError:
+            installed = False
+        self.assertEqual(timezones.default_lookup().available, installed)
+        self.assertEqual(timezones.default_lookup().name, "tzfpy" if installed else "unavailable")
+
+    def test_backend_can_be_disabled(self):
+        old = os.environ.get("PHOTO_TOOL_TIMEZONE_LOOKUP")
+        os.environ["PHOTO_TOOL_TIMEZONE_LOOKUP"] = "off"
+        try:
+            self.assertFalse(timezones.default_lookup().available)
+        finally:
+            if old is None:
+                del os.environ["PHOTO_TOOL_TIMEZONE_LOOKUP"]
+            else:
+                os.environ["PHOTO_TOOL_TIMEZONE_LOOKUP"] = old
+
+    def test_multiple_zones_any_match_is_consistent(self):
+        class TwoZones(BoxLookup):
+            def timezones_at(self, lat, lon):
+                return ["Asia/Shanghai", "Asia/Urumqi"]
+        raw = {"EXIF:ExifIFD:DateTimeOriginal": "2021:06:01 12:00:00", "EXIF:ExifIFD:OffsetTimeOriginal": "+06:00"}
+        r = timezones.evaluate(CTF_LAT, CTF_LON, capture_time.extract_capture_time(raw), TwoZones())
+        self.assertEqual((r["status"], r["matching_timezones"]), ("consistent", ["Asia/Urumqi"]))
+        self.assertIn("More than one local time", r["note"])
+        raw["EXIF:ExifIFD:OffsetTimeOriginal"] = "-05:00"
+        r = timezones.evaluate(CTF_LAT, CTF_LON, capture_time.extract_capture_time(raw), TwoZones())
+        self.assertEqual(r["status"], "inconsistent")
 
     def test_offset_sign_is_not_a_hemisphere(self):
         """A negative offset must not make a western candidate 'supported' without a timezone lookup."""
@@ -302,7 +334,8 @@ class CollectionContextTests(unittest.TestCase):
         cands = self.candidates(result)
         nw = cands["N/W"]["collection"]
         self.assertEqual(nw["same_device_resolved_near"], 1)
-        self.assertIn("same device model taken 2 minutes earlier", nw["supporting"][0]["statement"])
+        statement = nw["supporting"][0]["statement"]
+        self.assertIn("same device model (not necessarily the same physical device) taken 2 minutes earlier", statement)
         self.assertLess(nw["supporting"][0]["distance_km"], 2.0)
         self.assertTrue(cands["N/W"]["assessment"]["has_contextual_support"])
         # mirrored candidates: the same-device photo implies impossible travel -> conflict, not support
@@ -363,6 +396,181 @@ class CollectionContextTests(unittest.TestCase):
         self.assertIn("5 image(s) from Apple iPhone 12", pattern["statement"])
         self.assertIn("GPSLongitudeRef missing", pattern["statement"])
         self.assertIn("does not mean", pattern["disclaimer"])
+
+
+# ============================================================================ ordering
+
+def _cand(cid, support=(), conflict=()):
+    return {"id": cid, "assessment": {"supporting_signals": list(support), "conflicting_signals": list(conflict)}}
+
+
+class OrderingTests(unittest.TestCase):
+
+    def test_groups_and_stable_order(self):
+        cands = [_cand("N/E", conflict=["tz"]), _cand("N/W", support=["tz"]), _cand("S/E"),
+                 _cand("S/W", support=["photo"], conflict=["travel"])]
+        ordering = location_analysis.order_candidates(cands)
+        self.assertEqual([c["id"] for c in cands], ["N/W", "S/E", "S/W", "N/E"])
+        self.assertEqual([c["order"]["group"] for c in cands], [1, 2, 3, 4])
+        self.assertEqual(ordering["most_supported"], ["N/W"])
+        self.assertIn("NOT a resolved or confirmed location", ordering["note"])
+
+    def test_every_candidate_is_kept(self):
+        cands = [_cand(x, conflict=["c"]) for x in ("N/E", "N/W", "S/E", "S/W")]
+        location_analysis.order_candidates(cands)
+        self.assertEqual(sorted(c["id"] for c in cands), ["N/E", "N/W", "S/E", "S/W"])
+
+    def test_no_support_means_no_most_supported_label(self):
+        cands = [_cand("N/E"), _cand("N/W")]
+        ordering = location_analysis.order_candidates(cands)
+        self.assertEqual(ordering["most_supported"], [])
+        self.assertEqual([c["id"] for c in cands], ["N/E", "N/W"])      # generated order kept
+        self.assertIn("none is marked", ordering["note"])
+
+    def test_ties_are_reported(self):
+        cands = [_cand("N/E", support=["a"]), _cand("N/W", support=["b"])]
+        ordering = location_analysis.order_candidates(cands)
+        self.assertEqual(ordering["most_supported"], ["N/E", "N/W"])
+        self.assertIn("does not distinguish", ordering["note"])
+
+    def test_no_scores_and_no_confirmation_wording(self):
+        records = CollectionContextTests().build()
+        result = location_analysis.analyze_collection(records, BoxLookup())
+        image = result["images"][records[0].id]
+        self.assertEqual([c["id"] for c in image["candidates"]][0], "N/W")
+        for c in image["candidates"]:
+            keys = " ".join(_all_keys(c)).lower()
+            for forbidden in ("score", "probab", "confidence", "percent", "likelihood", "weight"):
+                self.assertNotIn(forbidden, keys)
+            # The candidate's OWN labels (statements about other, truly resolved photos may say "resolved").
+            own = " | ".join([c["label"], c["status"], c["assessment"]["status"], c["order"]["label"],
+                              c["order"]["reason"]]).lower()
+            for forbidden in ("correct", "confirmed location", "resolved", "valid", "true location"):
+                self.assertNotIn(forbidden, own.replace("not confirmed", ""))
+            self.assertIn("not confirmed", c["assessment"]["status"])
+
+    def test_evidence_categories(self):
+        records = CollectionContextTests().build()
+        result = location_analysis.analyze_collection(records, BoxLookup())
+        cands = {c["id"]: c for c in result["images"][records[0].id]["candidates"]}
+        cats = lambda cid: {e["category"] for e in cands[cid]["evidence"]}
+        self.assertEqual(cats("N/W"), {"supporting"})
+        self.assertIn("conflicting", cats("N/E"))
+        self.assertIn("weak", cats("N/E"))                  # unrelated Canon nearby = weak only
+        self.assertIn("unavailable", cats("S/W"))           # ocean: timezone not used
+        self.assertTrue(all(e["category"] in ("supporting", "conflicting", "weak", "unavailable")
+                            for c in cands.values() for e in c["evidence"]))
+
+
+def _all_keys(value):
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            yield str(key)
+            yield from _all_keys(inner)
+    elif isinstance(value, list):
+        for inner in value:
+            yield from _all_keys(inner)
+
+
+# ============================================================================ optional tzfpy backend
+
+try:
+    import tzfpy  # noqa: F401
+    HAVE_TZFPY = True
+except ImportError:
+    HAVE_TZFPY = False
+
+
+@unittest.skipUnless(HAVE_TZFPY, "optional tzfpy not installed (pip install -r requirements-timezone.txt)")
+class TzfpyBackendTests(unittest.TestCase):
+
+    def setUp(self):
+        self.lookup = timezones.default_lookup()
+
+    def evaluate(self, lat, lon, when, offset):
+        raw = {"EXIF:ExifIFD:DateTimeOriginal": when, "EXIF:ExifIFD:OffsetTimeOriginal": offset}
+        return timezones.evaluate(lat, lon, capture_time.extract_capture_time(raw), self.lookup)
+
+    def test_backend_metadata_and_attribution(self):
+        info = self.lookup.info()
+        self.assertTrue(info["available"])
+        self.assertEqual(info["name"], "tzfpy")
+        self.assertIn("ODbL", info["attribution"])
+        self.assertIn("OpenStreetMap", info["attribution"])
+
+    def test_ctf_candidates(self):
+        when = "2021:11:20 07:36:35"
+        nw = self.evaluate(CTF_LAT, -CTF_LON, when, "-05:00")
+        self.assertEqual((nw["status"], nw["timezone"]), ("consistent", "America/New_York"))
+        self.assertEqual(self.evaluate(CTF_LAT, CTF_LON, when, "-05:00")["status"], "inconsistent")
+        for lat, lon in ((-CTF_LAT, CTF_LON), (-CTF_LAT, -CTF_LON)):      # oceans
+            r = self.evaluate(lat, lon, when, "-05:00")
+            self.assertEqual(r["status"], "unknown")
+            self.assertIn("nautical", r["reason"])
+
+    def test_dst_with_real_boundaries(self):
+        self.assertEqual(self.evaluate(CTF_LAT, -CTF_LON, "2021:11:06 16:10:00", "-04:00")["status"], "consistent")
+        self.assertEqual(self.evaluate(-33.8568, 151.2153, "2022:01:15 14:10:00", "+11:00")["timezone"], "Australia/Sydney")
+
+    def test_xinjiang_two_local_times(self):
+        when = "2021:06:01 12:00:00"
+        for offset in ("+08:00", "+06:00"):
+            r = self.evaluate(39.47, 75.99, when, offset)                  # Kashgar
+            self.assertEqual(r["status"], "consistent", offset)
+            self.assertEqual(set(r["timezones"]), {"Asia/Shanghai", "Asia/Urumqi"})
+            self.assertIn("More than one local time", r["note"])
+        self.assertEqual(self.evaluate(39.47, 75.99, when, "+05:00")["status"], "inconsistent")
+        beijing = self.evaluate(39.90, 116.40, when, "+06:00")
+        self.assertEqual(beijing["status"], "inconsistent")              # only Asia/Shanghai there
+
+    def test_lookup_needs_no_network(self):
+        """Run lookups in a fresh interpreter in which every socket operation raises."""
+        script = "\n".join([
+            "import socket",
+            "def blocked(*a, **k): raise RuntimeError('NETWORK ACCESS ATTEMPTED')",
+            "socket.socket.connect = blocked; socket.socket.connect_ex = blocked",
+            "socket.create_connection = blocked; socket.getaddrinfo = blocked",
+            f"import sys; sys.path.insert(0, {ROOT!r})",
+            "from photo_tool import timezones",
+            "lookup = timezones.default_lookup()",
+            "assert lookup.available, 'tzfpy not active'",
+            "assert lookup.timezones_at(38.551734, -78.333293) == ['America/New_York']",
+            "print('OK', lookup.timezones_at(39.47, 75.99))",
+        ])
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("OK", result.stdout)
+
+
+# ============================================================================ frontend safety (static)
+
+class FrontendRenderingGuardTests(unittest.TestCase):
+    """
+    Leaflet renders STRING popup/tooltip content as HTML (innerHTML). Untrusted text
+    (filenames, metadata) must therefore reach Leaflet as DOM nodes. This static check
+    guards the code; the browser test (tests/browser/ui_checks.js) proves it with a
+    real filename '<img src=x id=pwn>.jpg'.
+    """
+
+    def setUp(self):
+        with open(os.path.join(ROOT, "static", "js", "app.js"), encoding="utf-8") as handle:
+            self.source = handle.read()
+
+    def test_leaflet_content_is_never_a_string(self):
+        import re
+        calls = re.findall(r"\.(bindTooltip|bindPopup|setContent|setTooltipContent|setPopupContent)\(\s*(.{0,40})", self.source)
+        self.assertTrue(calls)
+        for method, argument in calls:
+            argument = argument.strip()
+            self.assertTrue(argument.startswith("h(") or argument.startswith("() =>"),
+                            f"{method}({argument}...) must receive a DOM node or a function returning one")
+
+    def test_innerhtml_only_with_constants(self):
+        import re
+        for match in re.finditer(r"innerHTML\s*=\s*([^;\n]+)", self.source):
+            self.assertRegex(match.group(1).strip(), r"^ICONS\[", f"innerHTML assignment: {match.group(0)}")
+        for match in re.finditer(r"html:\s*([^,}\n]+)", self.source):
+            self.assertRegex(match.group(1).strip(), r'^"[^"]*"$', "divIcon html must be a constant string")
 
 
 # ============================================================================ API / end-to-end
