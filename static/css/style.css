@@ -549,6 +549,7 @@ input[type="checkbox"] { margin: 0 3px 0 0; vertical-align: -2px; accent-color: 
 .stat.s-auth::before { background: #2fa598; }
 .stat.s-clean::before { background: #3aa63a; }
 .stat.s-bad::before { background: #c42b1c; }
+.stat.s-amb::before { background: repeating-linear-gradient(#e3a531 0 4px, #fff4d6 4px 8px); }
 
 .workspace {
   display: grid;
@@ -653,6 +654,8 @@ input[type="checkbox"] { margin: 0 3px 0 0; vertical-align: -2px; accent-color: 
 }
 .b-gps { color: var(--gps); background: var(--gps-bg); border-color: var(--gps-bd); }
 .b-gpsx { color: var(--gps); background: #fff; border-color: var(--gps-bd); border-style: dashed; }
+/* GPS values present but hemisphere unknown: deliberately NOT the solid GPS style */
+.b-gpsamb { color: #7a4a00; background: repeating-linear-gradient(135deg, #fff4d6 0 4px, #ffe7a8 4px 8px); border-color: #d19a1e; border-style: dashed; }
 .b-time { color: var(--time); background: var(--time-bg); border-color: var(--time-bd); }
 .b-dev { color: var(--dev); background: var(--dev-bg); border-color: var(--dev-bd); }
 .b-sw { color: var(--sw); background: var(--sw-bg); border-color: var(--sw-bd); }

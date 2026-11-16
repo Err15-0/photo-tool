@@ -29,12 +29,12 @@ interpreted; the browser renders it with textContent (never innerHTML).
 
 import json
 import logging
-import math
 import re
 import shutil
 import subprocess
 
 from . import config
+from .gps import interpret_gps
 
 log = logging.getLogger(__name__)
 
@@ -120,10 +120,16 @@ def read_metadata_batch(paths):
     """
     Extract metadata for many files with as few ExifTool processes as possible.
 
-    Returns {path: {"raw": {...}, "numeric": {...}, "error": str or None}}.
+    Returns {path: {"raw": {...}, "numeric": {...}, "xmp_packet": str or None,
+                    "error": str or None}}.
     A failure for one file never affects the others.
+
+    "xmp_packet" is only read (one extra batched ExifTool run) for files that
+    contain XMP GPS coordinates: the hemisphere letter of an XMP coordinate is
+    only visible in the raw packet (ExifTool's converted value hides a missing
+    letter by assuming N/E - see photo_tool/gps.py).
     """
-    results = {path: {"raw": {}, "numeric": {}, "error": None} for path in paths}
+    results = {path: {"raw": {}, "numeric": {}, "xmp_packet": None, "error": None} for path in paths}
 
     for start in range(0, len(paths), config.EXIFTOOL_FILES_PER_CALL):
         chunk = paths[start:start + config.EXIFTOOL_FILES_PER_CALL]
@@ -145,6 +151,22 @@ def read_metadata_batch(paths):
             exiftool_error = readable[path].get("ExifTool:Error")
             if exiftool_error:
                 results[path]["error"] = f"ExifTool: {exiftool_error}"
+
+        with_xmp_gps = [
+            path for path in chunk
+            if any(split_key(k)[0] == "XMP" and split_key(k)[2] in ("GPSLatitude", "GPSLongitude")
+                   for k in results[path]["numeric"])
+        ]
+        if with_xmp_gps:
+            try:
+                packets = _run_exiftool_json(with_xmp_gps, ["-b", "-XMP"])
+            except ExifToolError as exc:
+                log.warning("Could not read raw XMP packets: %s", exc)
+                packets = {}
+            for path in with_xmp_gps:
+                packet = packets.get(path, {}).get("XMP:XMP") or packets.get(path, {}).get("XMP")
+                if isinstance(packet, str) and not packet.startswith("base64:"):
+                    results[path]["xmp_packet"] = packet
     return results
 
 
@@ -258,78 +280,12 @@ def find_tag_value(raw, tag_names, skip_families=("File", "ExifTool")):
 # GPS
 # =============================================================================
 
-def _to_float(value):
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
-def extract_gps(numeric):
+def extract_gps(numeric, xmp_packet=None):
     """
-    Read GPS coordinates from the NUMERIC (-n) ExifTool output.
-
-    Returns dict(latitude, longitude, altitude, status) where status is:
-        "valid"       usable coordinates (will be shown on the map)
-        "zero"        0,0 - almost always a bogus placeholder, not plotted
-        "invalid"     out of range / unparseable
-        "incomplete"  some GPS tags exist but no full coordinate pair
-        None          no GPS tags at all
+    GPS interpretation lives in photo_tool/gps.py (explicit valid / ambiguous /
+    incomplete states, hemisphere never guessed). Kept here as a thin wrapper.
     """
-    def pick(*keys):
-        for key in keys:
-            if key in numeric:
-                return numeric[key]
-        return None
-
-    lat = _to_float(pick("Composite:GPSLatitude"))
-    lon = _to_float(pick("Composite:GPSLongitude"))
-
-    # Fallback 1: XMP stores signed decimal degrees directly.
-    if lat is None or lon is None:
-        for key, value in numeric.items():
-            family0, _f1, tag = split_key(key)
-            if family0 == "XMP" and tag == "GPSLatitude" and lat is None:
-                lat = _to_float(value)
-            if family0 == "XMP" and tag == "GPSLongitude" and lon is None:
-                lon = _to_float(value)
-
-    # Fallback 2: raw EXIF GPS values + N/S/E/W reference tags.
-    if lat is None or lon is None:
-        exif_lat = _to_float(pick("EXIF:GPS:GPSLatitude"))
-        exif_lon = _to_float(pick("EXIF:GPS:GPSLongitude"))
-        if exif_lat is not None and exif_lon is not None:
-            if str(pick("EXIF:GPS:GPSLatitudeRef") or "N").upper().startswith("S"):
-                exif_lat = -abs(exif_lat)
-            if str(pick("EXIF:GPS:GPSLongitudeRef") or "E").upper().startswith("W"):
-                exif_lon = -abs(exif_lon)
-            lat, lon = exif_lat, exif_lon
-
-    altitude = _to_float(pick("Composite:GPSAltitude"))
-    if altitude is None:
-        altitude = _to_float(pick("EXIF:GPS:GPSAltitude"))
-        if altitude is not None and str(pick("EXIF:GPS:GPSAltitudeRef")) == "1":
-            altitude = -altitude
-
-    has_gps_tags = any(
-        split_key(key)[1] == "GPS" or split_key(key)[2].startswith("GPS")
-        for key in numeric
-    )
-
-    if lat is None or lon is None:
-        status = "incomplete" if has_gps_tags else None
-        return {"latitude": None, "longitude": None, "altitude": altitude, "status": status}
-    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-        return {"latitude": None, "longitude": None, "altitude": altitude, "status": "invalid"}
-    if lat == 0.0 and lon == 0.0:
-        return {"latitude": lat, "longitude": lon, "altitude": altitude, "status": "zero"}
-    return {
-        "latitude": round(lat, 7),
-        "longitude": round(lon, 7),
-        "altitude": None if altitude is None else round(altitude, 2),
-        "status": "valid",
-    }
+    return interpret_gps(numeric, xmp_packet)
 
 
 # =============================================================================
@@ -364,7 +320,7 @@ def _combine_make_model(make, model):
     return model or make or None
 
 
-def normalize_metadata(raw, numeric):
+def normalize_metadata(raw, numeric, xmp_packet=None):
     """
     Build the normalized dict used by the table/gallery/map.
     Missing values are None (the UI shows "-"). Nothing is invented.
@@ -391,7 +347,7 @@ def normalize_metadata(raw, numeric):
 
     make = value("Make")
     model = value("Model", "CameraModelName", "UniqueCameraModel")
-    gps = extract_gps(numeric)
+    gps = extract_gps(numeric, xmp_packet)
 
     normalized = {
         "file_type": value_from_file_group(raw, "FileType"),
@@ -415,10 +371,22 @@ def normalize_metadata(raw, numeric):
         "copyright": value("Copyright", "Rights", "CopyrightNotice"),
         "description": value("ImageDescription", "Description", "Caption-Abstract", "UserComment", "Comment", "XPComment"),
         "orientation": value("Orientation"),
+        # GPS: latitude/longitude are signed and ONLY set when the hemisphere is
+        # known (status "valid" or "zero"). See photo_tool/gps.py.
         "gps_latitude": gps["latitude"],
         "gps_longitude": gps["longitude"],
         "gps_altitude": gps["altitude"],
-        "gps_status": gps["status"],
+        "gps_status": gps["status"],            # valid / zero / ambiguous / invalid / incomplete / None
+        "gps_raw_latitude": gps["raw_latitude"],   # as recorded (unsigned for EXIF)
+        "gps_raw_longitude": gps["raw_longitude"],
+        "gps_latitude_ref": gps["latitude_ref"],   # "N"/"S" or None
+        "gps_longitude_ref": gps["longitude_ref"], # "E"/"W" or None
+        "gps_missing_refs": gps["missing_refs"],
+        "gps_invalid_refs": gps["invalid_refs"],
+        "gps_source": gps["source"],
+        "gps_message": gps["message"],
+        "gps_notes": gps["notes"],
+        "gps_display": gps["display"],
         "date_time_original_key": dto_key,
     }
     return normalized
@@ -549,7 +517,8 @@ def classify_sensitive_tags(raw):
 def compute_flags(normalized, sensitive):
     """Booleans used for thumbnail badges, filters and statistics."""
     return {
-        "gps": normalized.get("gps_status") == "valid",
+        "gps": normalized.get("gps_status") == "valid",            # resolved -> on the map
+        "gps_ambiguous": normalized.get("gps_status") == "ambiguous",  # values, hemisphere unknown
         "location_tags": "location" in sensitive,
         "timestamp": bool(normalized.get("timestamp")) or "timestamp" in sensitive,
         "device": bool(normalized.get("device")) or "device" in sensitive,
@@ -561,25 +530,30 @@ def compute_flags(normalized, sensitive):
     }
 
 
-def analyze_metadata(raw, numeric):
+def analyze_metadata(raw, numeric, xmp_packet=None):
     """
     Convenience wrapper: everything we derive from one file's ExifTool output.
     Returns dict(raw, normalized, sensitive, flags, tag_count, warnings).
     """
     cleaned = clean_raw_metadata(raw)
-    normalized = normalize_metadata(raw, numeric)
+    normalized = normalize_metadata(raw, numeric, xmp_packet)
     sensitive = classify_sensitive_tags(raw)
     flags = compute_flags(normalized, sensitive)
     warnings = []
     for key in ("ExifTool:Warning",):
         if key in raw:
             warnings.append(f"ExifTool warning: {_value_to_text(raw[key])}")
-    if normalized["gps_status"] == "zero":
+    status = normalized["gps_status"]
+    if status == "ambiguous":
+        warnings.append(f"{normalized['gps_message']} Raw values: {normalized['gps_display']}. Not plotted on the map.")
+    elif status == "zero":
         warnings.append("GPS coordinates are 0,0 (usually a placeholder) - not plotted on the map")
-    elif normalized["gps_status"] == "invalid":
-        warnings.append("GPS coordinates are out of range - not plotted on the map")
-    elif normalized["gps_status"] == "incomplete":
-        warnings.append("Some GPS tags exist but no complete latitude/longitude pair")
+    elif status == "invalid":
+        warnings.append(f"{normalized['gps_message']} Not plotted on the map.")
+    elif status == "incomplete":
+        warnings.append(f"{normalized['gps_message']} Not plotted on the map.")
+    for note in normalized["gps_notes"]:
+        warnings.append(f"GPS: {note}")
     return {
         "raw": cleaned,
         "normalized": normalized,
