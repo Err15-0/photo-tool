@@ -96,7 +96,7 @@ properties◀┘      │
 4. Pillow writes a thumbnail (320 px) and a preview (1600 px). Both are built from pixels only, so they carry no metadata.
 5. **`metadata.py`** runs ExifTool **once per batch** (`-json -G0:1 -a -s`), plus once more with `-n` for numeric GPS values. From that output it:
    * picks out the key fields
-   * validates the GPS
+   * interprets the GPS with explicit confidence states (`photo_tool/gps.py`, see below). For files with XMP GPS coordinates it also reads the raw XMP packet in one extra batched run.
    * sorts every tag into privacy categories
 6. The browser keeps the summaries in `state` and draws every panel from that state.
 
@@ -107,7 +107,7 @@ properties◀┘      │
 | `original_filename` | display only (untrusted text) |
 | `sha256`, `file_size`, `width`, `height`, `display_width/height`, `image_format` | file facts |
 | `raw` | **complete** ExifTool output as `{"EXIF:IFD0:Make": "Canon", ...}`, with filesystem tags of the temporary copy hidden |
-| `normalized` | key fields for the table: `device`, `timestamp`, `timestamp_sortable`, `software`, `gps_latitude`/`gps_longitude`/`gps_altitude`, `gps_status`, `artist`, `copyright`, `lens`, `serial_number`, ... (`None` means not present; the UI shows "-") |
+| `normalized` | key fields for the table: `device`, `timestamp`, `timestamp_sortable`, `software`, `gps_status`, `gps_latitude`/`gps_longitude` (signed, **only** when the hemisphere is known), `gps_raw_latitude`/`gps_raw_longitude`, `gps_latitude_ref`/`gps_longitude_ref`, `gps_missing_refs`, `gps_message`, `gps_display`, `gps_altitude`, `artist`, `copyright`, `lens`, `serial_number`, ... (`None` means not present; the UI shows "-") |
 | `sensitive` | `{category: [{key, value}]}`. Categories: location, timestamp, device, identifier, software, author, people, text, embedded, maker_notes |
 | `flags` | booleans for badges, filters and stats (`gps`, `timestamp`, `device`, `software`, `author`, ...) |
 | `sanitization` | the full before/after verification result, once the image is sanitized |
@@ -142,6 +142,44 @@ Each map marker stores its image ID (`marker.imageId`), and `mapState.markers` m
 | Status bar | `20 images | 10 GPS | 16 timestamps | …`, the selected image, upload progress, ExifTool/HEIC status, `Ready` | `app.js → renderStatusBar()`, `setActionStatus()` |
 
 Every menu item, toolbar button and caption button has a `data-command="..."` attribute. The `COMMANDS` table in `app.js` defines what each command does (`run`), when it is greyed out (`enabled`) and when a menu item shows a check mark (`checked`). Option commands such as "Mode: Lossless" only change the real form control (`#sanitize-mode`, `#heic-output`, `#keep-icc`, the map checkboxes). That control stays the single source of truth for the setting.
+
+### How GPS is interpreted (`photo_tool/gps.py`)
+**Principle: preserve uncertainty rather than invent certainty.** A confidently wrong map marker is worse than no marker.
+
+EXIF stores latitude and longitude as **unsigned** numbers. The hemisphere is in separate tags: `GPSLatitudeRef` (N = +, S = −) and `GPSLongitudeRef` (E = +, W = −). Photo Tool never assumes a missing hemisphere:
+
+| Status | Meaning | Map | Badge |
+|---|---|---|---|
+| `valid` | Hemisphere known from an explicit reference (or an explicit sign), values in range | **plotted** | `GPS` |
+| `ambiguous` | Latitude/longitude values exist, but the hemisphere of at least one axis is missing or unrecognised | **not plotted**; the raw values and the missing reference are shown everywhere else | `GPS ±?` |
+| `zero` | Resolves to 0,0 (almost always a placeholder) | not plotted | `GPS?` |
+| `invalid` | Hemisphere known but values out of range | not plotted | `GPS?` |
+| `incomplete` | GPS tags exist but no latitude/longitude pair | not plotted | `GPS?` |
+| none | No GPS metadata | – | – |
+
+How the hemisphere is decided:
+1. **EXIF GPS:** `GPSLatitudeRef`/`GPSLongitudeRef` must be `N`/`S` and `E`/`W` (or North/South/East/West). ExifTool's signed `Composite:GPSLatitude`/`GPSLongitude` is preferred, **but only after** the reference has been checked: ExifTool turns a malformed reference such as `X` into a *positive* composite value.
+2. **Missing or unrecognised reference:** the result is `ambiguous`, with the message *"GPS coordinates present, but hemisphere reference is missing (GPSLatitudeRef). Location cannot be determined reliably."* A coordinate of exactly 0° needs no hemisphere.
+3. **XMP GPS:** `exif:GPSLatitude` must carry its own letter (`22,54.408S`). Photo Tool checks the raw XMP packet, because ExifTool silently treats a value without a letter as N/E.
+4. **EXIF without reference, plus XMP with hemisphere:** the location is `valid` only if the XMP record has the **same** coordinates. Otherwise it stays `ambiguous`.
+5. **Never used to guess a hemisphere:** timezone offsets, locale, country names, filenames or any other context. They can still help an investigator, but they are not GPS hemisphere information.
+
+ExifTool traps found while auditing (ExifTool 12.76), all covered by `tests/test_gps.py`:
+* `Composite:GPSPosition` is generated even when **both** references are missing and shows the unsigned values (an implicit N/E). Photo Tool does not use it.
+* With `GPSLatitudeRef = X`, ExifTool still reports a positive `Composite:GPSLatitude` and prints "N".
+* An XMP coordinate without a letter is shown by ExifTool with an invented "N"/"E".
+
+Because of this, the **Raw EXIF** tab warns that ExifTool's own display can look resolved when it is not. The interpreted status is on the **Metadata** tab (GPS status, raw latitude/longitude with their references, source, note).
+
+Where ambiguous GPS shows up in the UI:
+* `GPS ±?` badge
+* **Ambiguous GPS** tile in Batch Summary, filter in Details, and item in the **Analyze** menu
+* `N ambiguous GPS` in the status bar
+* raw values with `?` in the Details GPS column
+* warnings in Properties
+* a note under the map
+
+Sanitize verification also reports ambiguous coordinates as **Removed**.
 
 ### How sanitization works (`photo_tool/sanitize.py`)
 | Mode | What happens | Pixels |
@@ -197,7 +235,8 @@ photo-tool/
 │   ├── config.py              all limits and settings (env-overridable)
 │   ├── workspace.py           ImageRecord + in-memory store + temp directory
 │   ├── uploads.py             validation, safe storage, thumbnails/previews
-│   ├── metadata.py            ExifTool runner, normalization, GPS, sensitivity rules
+│   ├── metadata.py            ExifTool runner, normalization, sensitivity rules
+│   ├── gps.py                 GPS interpretation: valid / ambiguous / incomplete (never guesses a hemisphere)
 │   ├── sanitize.py            sanitization (2 modes) + verification/comparison
 │   ├── downloads.py           safe download names, ZIP building
 │   └── heif_support.py        enables HEIC/HEIF via pillow-heif (optional)
@@ -207,6 +246,8 @@ photo-tool/
 │   ├── css/style.css
 │   ├── js/app.js              all frontend logic (state, rendering, sync, upload)
 │   └── vendor/leaflet/        bundled Leaflet 1.9.4 (BSD-2 licence)
+├── tests/
+│   └── test_gps.py            GPS hemisphere regression tests (unittest)
 └── tools/
     ├── make_test_images.py    generates a demo/test batch with fake metadata
     └── smoke_test.py          automated end-to-end test (no browser needed)
@@ -271,7 +312,7 @@ PHOTO_TOOL_PORT=8080 PHOTO_TOOL_DEBUG=1 python app.py
 ```
 
 ### Demo data
-Make a test batch with fake metadata. It covers GPS in several cities, duplicate names, a corrupted file, a rotated image, PNG text chunks, WebP, TIFF, Photoshop history, an embedded thumbnail and 0,0 GPS:
+Make a test batch with fake metadata. It covers GPS in several cities (all four hemispheres), CTF-style GPS with missing or malformed hemisphere references, duplicate names, a corrupted file, a rotated image, PNG text chunks, WebP, TIFF, Photoshop history, an embedded thumbnail and 0,0 GPS:
 ```bash
 python tools/make_test_images.py
 ```
@@ -280,6 +321,11 @@ Then drag the `sample_images/` folder onto the drop zone.
 Automated end-to-end check (upload, both sanitize modes, verification, ZIP, originals unchanged):
 ```bash
 python tools/smoke_test.py
+```
+
+GPS regression tests: N/E, N/W, S/E, S/W, missing references, malformed references, XMP with and without hemisphere letters, no GPS. The ExifTool-based tests are skipped automatically if ExifTool is not installed.
+```bash
+python -m unittest discover -s tests -v
 ```
 
 ---
@@ -292,7 +338,7 @@ Use `sample_images/` (file names below) or your own photos.
 |---|---|---|---|
 | 1 | JPEG with EXIF, no GPS | Upload `01_exif_no_gps.jpg` | Badges TIME, DEV, SW, AUTH, ID. Table shows the Canon device, timestamp and `-` for GPS. Map says *"No GPS metadata found in this batch."* |
 | 2 | JPEG with GPS | Upload `02_gps_phoenix_morning.jpg` | GPS badge, coordinates in the table, marker near Phoenix, popup with thumbnail, filename, lat/lon, time and device |
-| 3 | Many at once | Drag the whole `sample_images` folder anywhere into the window | 20 thumbnails (18 without pillow-heif), 2 rejected files listed, Batch Summary and status bar filled in, map fits all markers |
+| 3 | Many at once | Drag the whole `sample_images` folder anywhere into the window | 27 thumbnails (25 without pillow-heif), 2 rejected files listed, Batch Summary and status bar filled in, map fits all markers (12 resolved GPS) |
 | 4 | Duplicate filenames | `folder_a/photo.jpg` and `folder_b/photo.jpg` | Two separate cards marked "same name". The byte-identical copy is marked "identical ×2". Each has its own ID and metadata. Correlation lists them. |
 | 5 | No EXIF | `08_no_metadata.png` | Badge "none", all fields `-`, no errors |
 | 6 | Corrupted / fake | `10_corrupted_truncated.jpg`, `11_not_an_image.jpg` | Both listed under "rejected" with a reason. The rest of the batch is fine. |
@@ -302,6 +348,8 @@ Use `sample_images/` (file names below) or your own photos.
 | 10 | Sanitize one | Select an image → toolbar **Sanitize ▾ → Sanitize Selected Image** (or the **Sanitize Image** button in Properties) | Properties switches to the **Sanitize** tab: green "Verified clean" shield, an **Original Metadata → Sanitized Metadata** table with a green ✓ **Removed** for GPS, timestamps and device, plus lists of remaining and removed tags. The thumbnail gets ✔ CLEAN. |
 | 11 | Manual ExifTool check | Download the sanitized copy, then run the commands in section 6 | No GPS, Make, Model, dates, Software or Artist tags |
 | 12 | Several + ZIP | Tick 3 images → **Sanitize ▾ → Sanitize Ticked Images (3)** → **Export ▾ → Ticked Sanitized Images as ZIP** | `sanitized_images.zip` with `name_sanitized.ext` files. Duplicate names become `photo_sanitized.jpg` and `photo_sanitized_2.jpg`. |
+| 13 | GPS hemispheres | Upload `21_gps_south_east_sydney.jpg`, `22_gps_south_west_rio.jpg`, `02_gps_phoenix_morning.jpg` (N/W), `04_gps_berlin.jpg` (N/E) | All four plotted in the right place; Sydney has a negative latitude, Rio has negative latitude and longitude |
+| 14 | Ambiguous GPS | Upload `23_gps_missing_lat_ref.jpg` … `27_xmp_gps_no_hemisphere_letter.jpg` | **No markers.** `GPS ±?` badge, "Ambiguous GPS" tile = 5, status bar "5 ambiguous GPS". The Details GPS column shows raw values with `?` for the unknown hemisphere. Properties → Metadata shows "reference: MISSING" and names the missing tag. The Privacy tab explains why it is not on the map, with no OpenStreetMap link. |
 
 Extra checks:
 * Filters (Details pane or **Analyze** menu), the search box, Batch Summary tiles and Correlation values all filter the thumbnails, table and map together. **All Images** / Esc resets everything.
@@ -310,6 +358,7 @@ Extra checks:
 * `12_rotated_orientation6.jpg` displays upright, and the sanitized copy is upright too (in re-encode mode the rotation is baked in).
 * `16_embedded_thumbnail.jpg` gets a THUMB badge, and the embedded thumbnail is gone after sanitizing.
 * `17_gps_zero_zero.jpg` has a "GPS?" badge, a warning, and no marker.
+* Sanitize an ambiguous-GPS image: the Original → Sanitized table shows e.g. `33.4484° N, 112.074° ? (ambiguous)` → ✓ Removed.
 * `18_png_named_as.jpg` shows an "extension mismatch" warning.
 * Lossless mode on `14_tiff_with_artist.tif` comes out verified clean.
 * **HEIC:** `19_iphone_new_york.heic` and `20_iphone_statue.heif` show thumbnails, GPS markers in New York and Apple device info. Sanitize with "HEIC → JPEG": the download is `..._sanitized.jpg` and the before/after panel shows `Format HEIC → JPEG`. Choose "keep HEIC" and sanitize again: the download is `..._sanitized.heic`, also verified clean.
@@ -358,7 +407,8 @@ mkdir -p /tmp/check && unzip -o ~/Downloads/sanitized_images.zip -d /tmp/check &
 | "Request too large" (413) | File > limit | `PHOTO_TOOL_MAX_FILE_MB`; `config.py` |
 | A field shows `-` but ExifTool shows a value | Tag name not in the lookup list | `metadata.py → normalize_metadata()` (add the tag name to the list for that field) |
 | Badge/category wrong or missing | Classification rules | `metadata.py → classify_tag()` and the regex/sets above it |
-| GPS not on the map | `gps_status` is zero/invalid/incomplete | Warnings on the Properties → General tab; `metadata.py → extract_gps()` |
+| GPS not on the map | `gps_status` is ambiguous/zero/invalid/incomplete (only `valid` is plotted) | Properties → Metadata → GPS status / note; `photo_tool/gps.py → interpret_gps()`; run `python -m unittest discover -s tests -v` |
+| Hemisphere looks wrong | Check the reference tags yourself | `exiftool -a -G1 -s -n -GPS:all -XMP-exif:GPS* file.jpg`, and `exiftool -b -XMP file.jpg` for the raw XMP letter |
 | Map is grey | Tiles blocked, offline, or toggle off | Browser devtools Network tab; `app.js → setTilesEnabled()`; CSP `img-src` in `app.py` |
 | Map is the wrong size / half drawn | Leaflet measured a hidden container | `app.js → ensureMap()` (`invalidateSize`) |
 | Clicking X does not update Y | Selection sync | `app.js → selectImage()` / `updateSelectionUI()` |
@@ -396,6 +446,8 @@ Server logs go to the terminal. Start with `PHOTO_TOOL_DEBUG=1` to also see Exif
 * **Map tiles:** the tile server sees which map areas you view, and so could infer where your photos were taken. Switch tiles off for sensitive cases.
 * **Single user:** the workspace is in memory and is lost on restart. There is no authentication, so do not expose the tool on a network.
 * The sensitivity rules use tag names. Vendor maker notes are flagged as one category rather than parsed one by one.
+* **GPS altitude:** a missing `GPSAltitudeRef` is read as "above sea level", which is the EXIF default. Latitude/longitude are never defaulted.
+* **GPS sources:** only EXIF and XMP GPS coordinates are interpreted. Video-style QuickTime `GPSCoordinates` are not used for the map.
 
 
 ## AI Usage

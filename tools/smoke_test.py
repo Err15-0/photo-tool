@@ -41,12 +41,21 @@ def main():
 
     paths = collect_files(folder)
     print(f"Uploading {len(paths)} file(s) from {folder}")
-    data = {"files": [(open(p, "rb"), os.path.basename(p)) for p in paths]}
-    response = client.post("/api/upload", data=data, headers=HEADERS, content_type="multipart/form-data")
-    for handle, _ in data["files"]:
-        handle.close()
-    body = response.get_json()
-    print(f"HTTP {response.status_code}: {len(body['images'])} accepted, {len(body['errors'])} rejected\n")
+    # Upload in chunks of 10, like the browser (the server accepts at most 25 files per request).
+    body = {"images": [], "errors": []}
+    for start in range(0, len(paths), 10):
+        data = {"files": [(open(p, "rb"), os.path.basename(p)) for p in paths[start:start + 10]]}
+        response = client.post("/api/upload", data=data, headers=HEADERS, content_type="multipart/form-data")
+        for handle, _ in data["files"]:
+            handle.close()
+        chunk = response.get_json()
+        if response.status_code != 200:
+            print(f"  UPLOAD FAILED (HTTP {response.status_code}): {chunk}")
+            failures += 1
+            continue
+        body["images"] += chunk["images"]
+        body["errors"] += chunk["errors"]
+    print(f"{len(body['images'])} accepted, {len(body['errors'])} rejected\n")
 
     for error in body["errors"]:
         print(f"  REJECTED {error['filename']}: {error['error']}")
@@ -54,7 +63,8 @@ def main():
     for image in body["images"]:
         n = image["normalized"]
         flags = [k for k, v in image["flags"].items() if v]
-        gps = f"{n.get('gps_latitude')},{n.get('gps_longitude')}" if image["flags"].get("gps") else "-"
+        gps = (f"{n.get('gps_latitude')},{n.get('gps_longitude')}" if image["flags"].get("gps")
+               else f"[{n.get('gps_status')}] {n.get('gps_display') or ''}" if n.get("gps_status") else "-")
         print(f"  {image['filename']:<32} {image['format']:<5} device={n.get('device') or '-':<24} "
               f"time={n.get('timestamp') or '-':<20} gps={gps:<22} flags={','.join(flags)}")
         for warning in image["warnings"]:
