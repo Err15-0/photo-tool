@@ -2318,8 +2318,16 @@ function wireEvents() {
   $("btn-pick-files").addEventListener("click", (e) => { e.stopPropagation(); $("input-files").click(); });
   $("btn-pick-folder").addEventListener("click", (e) => { e.stopPropagation(); $("input-folder").click(); });
   const dropZone = $("drop-zone");
-  dropZone.addEventListener("click", () => $("input-files").click());
-  dropZone.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("input-files").click(); } });
+  // Only clicks/keys on the drop zone ITSELF open the image picker – not ones that bubble up from
+  // its buttons ("Add Folder…" must open the folder picker, not be overridden by this handler).
+  dropZone.addEventListener("click", (e) => {
+    if (e.target.closest("button, input, a, label")) return;
+    $("input-files").click();
+  });
+  dropZone.addEventListener("keydown", (e) => {
+    if (e.target !== dropZone) return;
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); $("input-files").click(); }
+  });
   for (const id of ["input-files", "input-folder"]) {
     $(id).addEventListener("change", (e) => { uploadFiles(e.target.files); e.target.value = ""; });
   }
