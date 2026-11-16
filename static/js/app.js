@@ -718,7 +718,7 @@ function fitMapToMarkers() {
   const markers = [...mapState.markers.values()];
   if (markers.length === 0) return;
   const bounds = L.latLngBounds(markers.map((m) => m.getLatLng()));
-  mapState.map.fitBounds(bounds, { padding: [40, 40], maxZoom: 13 });
+  mapState.map.fitBounds(bounds, fitOptions(13));
 }
 
 function updateMapNote() {
@@ -731,7 +731,11 @@ function updateMapNote() {
   if (ignored) notes.push(`${ignored} image(s) have GPS tags that could not be plotted (0,0 / invalid / incomplete).`);
   if (!mapState.tiles) notes.push("Online tiles are OFF: markers are shown on a blank background and no requests go to OpenStreetMap.");
   const sel = state.selectedId && state.byId.get(state.selectedId);
-  if (sel && sel.flags.gps_ambiguous) notes.push("The selected image has GPS coordinates but no usable hemisphere reference, so it is not on the map.");
+  if (sel && sel.flags.gps_ambiguous) {
+    notes.push(state.showCandidates
+      ? "The selected image has no resolved location; only its POSSIBLE locations are shown (purple \"?\" markers) – none of them is confirmed."
+      : "The selected image has GPS coordinates but no usable hemisphere reference, so it is not on the map (tick \"Show possible locations\" to see its candidates).");
+  }
   else if (sel && !sel.flags.gps) notes.push("The selected image has no resolved GPS coordinates.");
   $("map-note").textContent = notes.join(" ");
 }
@@ -858,20 +862,28 @@ function updateCandidateSelection(source) {
   }
   if (source && source !== "candidate" && selected.length && mapState.map) {
     mapState.map.closePopup();
-    mapState.map.fitBounds(L.latLngBounds(selected.map((m) => m.getLatLng())), { padding: [50, 50], maxZoom: 6 });
+    mapState.map.fitBounds(L.latLngBounds(selected.map((m) => m.getLatLng())), fitOptions(6));
   }
+}
+
+/** fitBounds options that keep markers out from under the candidate banner. */
+function fitOptions(maxZoom) {
+  const banner = $("candidate-banner");
+  const top = banner && !banner.classList.contains("hidden") ? banner.offsetTop + banner.offsetHeight + 24 : 40;
+  return { paddingTopLeft: [40, top], paddingBottomRight: [40, 40], maxZoom };
 }
 
 function fitMapToEverything() {
   const points = [...mapState.markers.values(), ...mapState.candidateMarkers.map((m) => m.marker)].map((m) => m.getLatLng());
-  if (points.length) mapState.map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 13 });
+  if (points.length) mapState.map.fitBounds(L.latLngBounds(points), fitOptions(13));
 }
 
 function setShowCandidates(on) {
   state.showCandidates = !!on;
   $("toggle-candidates").checked = state.showCandidates;
   renderMapMarkers();
-  if (on) loadLocationAnalysis().then(() => { renderCandidateMarkers(); fitMapToEverything(); updateCandidateSelection(null); });
+  if (on) loadLocationAnalysis().then(() => { renderCandidateMarkers(); fitMapToEverything(); updateCandidateSelection(null); updateMapNote(); });
+  else updateMapNote();
   refreshCommandStates();
 }
 

@@ -816,10 +816,13 @@ input[type="checkbox"] { margin: 0 3px 0 0; vertical-align: -2px; accent-color: 
   background: rgba(255, 251, 229, .95); border: 1px solid #e6d28a; border-left: 4px solid #d9a400;
   box-shadow: 1px 1px 3px rgba(0, 0, 0, .2); pointer-events: none;
 }
-.candidate-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; margin-top: 2px; }
-.lg-resolved { display: inline-block; width: 11px; height: 11px; border-radius: 50%; background: #d9534a; border: 2px solid #fff; box-shadow: 0 0 0 1px #999; }
-.lg-candidate { display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; border: 2px dashed #b97a00; font: bold 9px/1 var(--font); color: #7a4a00; }
-.lg-candidate.lg-support { border-color: #1f6fd1; color: #174f96; }
+.candidate-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; margin-top: 3px; }
+/* icon + text stay together; only whole items wrap */
+.lg-item { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+/* same look as the resolved circle markers (red fill, white 2px stroke) */
+.lg-resolved { display: inline-block; width: 14px; height: 14px; border-radius: 50%; background: #d9534a; border: 2px solid #fff; box-shadow: 0 0 0 1px #b0b0b0; }
+/* .candidate-icon is the real marker class; .lg-icon only makes it usable inline */
+.candidate-icon.lg-icon { position: relative; display: inline-grid !important; flex-shrink: 0; }
 .candidate-toggle { color: #7a4a00 !important; }
 .derived-warning { margin: 3px 0; padding: 3px 6px; background: #fffbe5; border: 1px solid #e6d28a; color: #4a3a00; font-size: 11px; }
 .candidate-popup .popup-name { color: #7a4a00; }
