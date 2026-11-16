@@ -68,6 +68,7 @@
           <button type="button" class="menu-item" data-command="next-image"><span class="mi-check"></span><span class="mi-label">Next Image</span><span class="mi-key">→</span></button>
           <div class="menu-sep"></div>
           <button type="button" class="menu-item" data-command="filter-gps"><span class="mi-check"></span><span class="mi-label">Only Images with Resolved GPS</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="investigate-ambiguous"><span class="mi-check"></span><span class="mi-label">Investigate Ambiguous GPS…</span><span class="mi-key"></span></button>
           <button type="button" class="menu-item" data-command="filter-gps-ambiguous"><span class="mi-check"></span><span class="mi-label">Only Images with Ambiguous GPS</span><span class="mi-key"></span></button>
           <button type="button" class="menu-item" data-command="filter-timestamp"><span class="mi-check"></span><span class="mi-label">Only Images with Timestamp</span><span class="mi-key"></span></button>
           <button type="button" class="menu-item" data-command="filter-device"><span class="mi-check"></span><span class="mi-label">Only Images with Device Info</span><span class="mi-key"></span></button>
@@ -86,6 +87,7 @@
           <button type="button" class="menu-item" data-command="toggle-expand-thumbs"><span class="mi-check"></span><span class="mi-label">Show All Thumbnails (no scrolling)</span><span class="mi-key"></span></button>
           <div class="menu-sep"></div>
           <button type="button" class="menu-item" data-command="toggle-map-path"><span class="mi-check"></span><span class="mi-label">Chronological Path on Map</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="toggle-candidates"><span class="mi-check"></span><span class="mi-label">Show Possible Locations (derived, ambiguous GPS)</span><span class="mi-key"></span></button>
           <button type="button" class="menu-item" data-command="toggle-map-tiles"><span class="mi-check"></span><span class="mi-label">Online Map Tiles (OpenStreetMap)</span><span class="mi-key"></span></button>
           <button type="button" class="menu-item" data-command="fit-map"><span class="mi-check"></span><span class="mi-label">Fit Map to All Markers</span><span class="mi-key"></span></button>
           <div class="menu-sep"></div>
@@ -315,11 +317,21 @@
                 <div class="pane-tools">
                   <button id="btn-map-fit" class="btn btn-small" type="button">Fit all</button>
                   <label class="pane-sub" title="Connect GPS points of each device in chronological order"><input type="checkbox" id="toggle-map-path"> Path</label>
+                  <label class="pane-sub candidate-toggle" title="Show every location that is mathematically possible for images whose GPS hemisphere is unknown. These are derived candidates, not confirmed locations."><input type="checkbox" id="toggle-candidates"> Show possible locations</label>
                   <label class="pane-sub" title="Map tiles are loaded from tile.openstreetmap.org. The tile server can infer which area you are looking at."><input type="checkbox" id="toggle-map-tiles" checked> Online tiles</label>
                 </div>
               </div>
               <div class="map-container">
                 <div id="map"></div>
+                <div id="candidate-banner" class="candidate-banner hidden" role="note">
+                  <div><strong>⚠ These locations are derived from ambiguous GPS metadata and are not confirmed locations.</strong></div>
+                  <div class="candidate-legend">
+                    <span class="lg-resolved"></span> resolved GPS (metadata fact)
+                    <span class="lg-candidate">?</span> possible location (derived)
+                    <span class="lg-candidate lg-support">?</span> with contextual evidence
+                  </div>
+                  <div id="candidate-banner-count" class="small"></div>
+                </div>
                 <div id="map-empty" class="map-empty hidden">No GPS metadata found in this batch.</div>
               </div>
               <div id="map-note" class="pane-footer"></div>

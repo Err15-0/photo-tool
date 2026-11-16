@@ -86,6 +86,60 @@ def gps_tags(lat, lon, alt=None):
     return tags
 
 
+def make_ctf_collection(out):
+    """
+    An iPhone series in the Shenandoah Valley (Virginia, 38.55 N / 78.33 W) where
+    some photos lost their GPS hemisphere references, plus control cases.
+    Expected: ambiguous photos get 2 or 4 DERIVED candidates; the N/W candidate is
+    supported by resolved photos of the same device minutes apart; the mirrored
+    N/E candidate (Xinjiang) only has an UNRELATED Canon photo nearby.
+    """
+    iphone = ["-Make=Apple", "-Model=iPhone 12", "-Software=15.1"]
+
+    def photo(name, label, color, when, offset, gps, drop_refs=(), extra=()):
+        path = make_picture(out(f"ctf_collection/{name}"), label, color, size=(800, 600))
+        args = list(extra)
+        if when:
+            args += [f"-DateTimeOriginal={when}", f"-CreateDate={when}"]
+        if offset:
+            args += [f"-OffsetTimeOriginal={offset}", f"-OffsetTimeDigitized={offset}"]
+        if gps:
+            args += gps_tags(*gps)
+        exiftool(path, *args)
+        if drop_refs:
+            exiftool(path, *[f"-{ref}=" for ref in drop_refs])
+        return path
+
+    both = ("GPSLatitudeRef", "GPSLongitudeRef")
+    photo("IMG_4012.JPG", "07:31 refs missing", (60, 90, 40), "2021:11:20 07:31:12", "-05:00",
+          (38.551734, -78.333293), both, iphone)
+    photo("IMG_4013.JPG", "07:34 resolved N/W", (70, 110, 50), "2021:11:20 07:34:40", "-05:00",
+          (38.560201, -78.340102), (), iphone)
+    photo("IMG_4014.JPG", "07:36 CTF case", (80, 120, 60), "2021:11:20 07:36:35", "-05:00",
+          (38.551734, -78.333293), both, iphone)
+    photo("IMG_4015.JPG", "07:42 resolved N/W", (90, 130, 70), "2021:11:20 07:42:05", "-05:00",
+          (38.544917, -78.319844), (), iphone)
+    photo("IMG_4016.JPG", "07:50 LongitudeRef missing", (100, 140, 80), "2021:11:20 07:50:30", "-05:00",
+          (38.549100, -78.338000), ("GPSLongitudeRef",), iphone)
+    # DST-sensitive: two weeks earlier New York was still on -04:00
+    photo("IMG_3901.JPG", "Nov 6 (DST) refs missing", (120, 90, 40), "2021:11:06 16:10:00", "-04:00",
+          (38.600000, -78.400000), both, iphone)
+    # Malformed offset / no capture time at all
+    photo("IMG_4020.JPG", "offset +25:00", (120, 60, 60), "2021:11:20 09:00:00", None,
+          (38.551734, -78.333293), both, iphone + ["-OffsetTimeOriginal=+25:00"])
+    photo("IMG_4021.JPG", "no capture time", (90, 60, 90), None, None,
+          (38.551734, -78.333293), both, iphone)
+    # Unrelated device, years earlier, close to the MIRRORED N/E candidate (Xinjiang)
+    photo("canon_kashgar_2019.jpg", "unrelated Canon", (150, 120, 60), "2019:05:02 12:00:00", "+08:00",
+          (38.560000, 78.350000), (), ["-Make=Canon", "-Model=Canon EOS R6"])
+    # Southern hemisphere series: Sydney, longitude reference missing
+    pixel = ["-Make=Google", "-Model=Pixel 6"]
+    photo("PXL_20220115_141000.jpg", "Sydney LongitudeRef missing", (40, 90, 130), "2022:01:15 14:10:00", "+11:00",
+          (-33.856800, 151.215300), ("GPSLongitudeRef",), pixel)
+    photo("PXL_20220115_142500.jpg", "Sydney resolved", (50, 100, 140), "2022:01:15 14:25:00", "+11:00",
+          (-33.859000, 151.214000), (), pixel)
+
+
 def main():
     if not EXIFTOOL:
         sys.exit("ExifTool not found. Install it: sudo apt install libimage-exiftool-perl")
@@ -218,6 +272,9 @@ def main():
             "</rdf:Description></rdf:RDF></x:xmpmeta>")
     exiftool(p, f"-XMP<={sidecar}")
     os.remove(sidecar)
+
+    # 28+. ctf_collection/: realistic ambiguous-GPS collection for candidate analysis
+    make_ctf_collection(out)
 
     print(f"Sample images written to {OUTPUT}")
     for root, _dirs, files in os.walk(OUTPUT):
