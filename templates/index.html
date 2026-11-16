@@ -325,10 +325,12 @@
                 <div id="map"></div>
                 <div id="candidate-banner" class="candidate-banner hidden" role="note">
                   <div><strong>⚠ These locations are derived from ambiguous GPS metadata and are not confirmed locations.</strong></div>
+                  <!-- Legend icons reuse the SAME CSS classes as the map markers, so they always match. -->
                   <div class="candidate-legend">
-                    <span class="lg-resolved"></span> resolved GPS (metadata fact)
-                    <span class="lg-candidate">?</span> possible location (derived)
-                    <span class="lg-candidate lg-support">?</span> with contextual evidence
+                    <div class="lg-item"><span class="lg-resolved"></span><span>resolved GPS (metadata fact)</span></div>
+                    <div class="lg-item"><span class="candidate-icon lg-icon">?</span><span>possible location (derived)</span></div>
+                    <div class="lg-item"><span class="candidate-icon has-support lg-icon">?</span><span>blue dot: supporting contextual evidence</span></div>
+                    <div class="lg-item"><span class="candidate-icon selected lg-icon">?</span><span>purple: candidates of the selected photo</span></div>
                   </div>
                   <div id="candidate-banner-count" class="small"></div>
                 </div>

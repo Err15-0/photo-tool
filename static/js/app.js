@@ -665,6 +665,8 @@ function renderMapMarkers() {
     // Leaflet treats STRING tooltip content as HTML -> always pass a DOM node for untrusted text.
     marker.bindTooltip(h("span", null, img.filename), { direction: "top", offset: [0, -6] });
     marker.on("click", () => selectImage(img.id, "map"));
+    marker.on("mouseover", () => showMapLegend(marker));   // only while candidates are shown
+    marker.on("mouseout", hideMapLegend);
     marker.addTo(mapState.markerLayer);
     mapState.markers.set(img.id, marker);
   }
@@ -718,7 +720,7 @@ function fitMapToMarkers() {
   const markers = [...mapState.markers.values()];
   if (markers.length === 0) return;
   const bounds = L.latLngBounds(markers.map((m) => m.getLatLng()));
-  mapState.map.fitBounds(bounds, { padding: [40, 40], maxZoom: 13 });
+  mapState.map.fitBounds(bounds, fitOptions(13));
 }
 
 function updateMapNote() {
@@ -731,7 +733,11 @@ function updateMapNote() {
   if (ignored) notes.push(`${ignored} image(s) have GPS tags that could not be plotted (0,0 / invalid / incomplete).`);
   if (!mapState.tiles) notes.push("Online tiles are OFF: markers are shown on a blank background and no requests go to OpenStreetMap.");
   const sel = state.selectedId && state.byId.get(state.selectedId);
-  if (sel && sel.flags.gps_ambiguous) notes.push("The selected image has GPS coordinates but no usable hemisphere reference, so it is not on the map.");
+  if (sel && sel.flags.gps_ambiguous) {
+    notes.push(state.showCandidates
+      ? "The selected image has no resolved location; only its POSSIBLE locations are shown (purple \"?\" markers) – none of them is confirmed."
+      : "The selected image has GPS coordinates but no usable hemisphere reference, so it is not on the map (tick \"Show possible locations\" to see its candidates).");
+  }
   else if (sel && !sel.flags.gps) notes.push("The selected image has no resolved GPS coordinates.");
   $("map-note").textContent = notes.join(" ");
 }
@@ -812,7 +818,7 @@ function renderCandidateMarkers() {
   mapState.candidateLayer.clearLayers();
   mapState.candidateMarkers = [];
   const showing = state.showCandidates;
-  $("candidate-banner").classList.toggle("hidden", !showing);
+  $("candidate-banner").classList.add("hidden");   // shown only while hovering a map marker
   if (!showing) return;
   if (!state.locationAnalysis) {
     loadLocationAnalysis().then(() => { renderCandidateMarkers(); refreshCandidateBanner(); })
@@ -831,6 +837,8 @@ function renderCandidateMarkers() {
       marker.bindTooltip(h("span", null, `${candidate.label} (derived – not confirmed)`), { direction: "top", offset: [0, -10] });
       marker.bindPopup(() => buildCandidatePopup(image, candidate), { maxWidth: 340 });
       marker.on("click", () => selectImage(image.id, "candidate"));
+      marker.on("mouseover", () => showMapLegend(marker));
+      marker.on("mouseout", hideMapLegend);
       marker.addTo(mapState.candidateLayer);
       mapState.candidateMarkers.push({ marker, imageId: image.id, candidate });
     }
@@ -838,6 +846,29 @@ function renderCandidateMarkers() {
   refreshCandidateBanner();
   // Do not let the "no GPS" overlay hide the candidates.
   if (mapState.candidateMarkers.length) $("map-empty").classList.add("hidden");
+}
+
+let mapLegendTimer = null;
+
+/**
+ * The warning + legend banner is hidden by default and appears while the mouse
+ * is over a map marker (only when "Show possible locations" is on). It opens on
+ * the half of the map AWAY from the hovered marker so it never covers it.
+ * Touch screens have no hover: tapping a candidate opens its popup, which
+ * carries the same warning.
+ */
+function showMapLegend(marker) {
+  if (!state.showCandidates || !mapState.map) return;
+  clearTimeout(mapLegendTimer);
+  const banner = $("candidate-banner");
+  const point = mapState.map.latLngToContainerPoint(marker.getLatLng());
+  banner.classList.toggle("at-bottom", point.y < mapState.map.getSize().y / 2);
+  banner.classList.remove("hidden");
+}
+
+function hideMapLegend() {
+  clearTimeout(mapLegendTimer);
+  mapLegendTimer = setTimeout(() => $("candidate-banner").classList.add("hidden"), 150);
 }
 
 function refreshCandidateBanner() {
@@ -858,20 +889,26 @@ function updateCandidateSelection(source) {
   }
   if (source && source !== "candidate" && selected.length && mapState.map) {
     mapState.map.closePopup();
-    mapState.map.fitBounds(L.latLngBounds(selected.map((m) => m.getLatLng())), { padding: [50, 50], maxZoom: 6 });
+    mapState.map.fitBounds(L.latLngBounds(selected.map((m) => m.getLatLng())), fitOptions(6));
   }
+}
+
+/** fitBounds options (the legend banner only appears on hover, so no extra room is needed). */
+function fitOptions(maxZoom) {
+  return { padding: [40, 40], maxZoom };
 }
 
 function fitMapToEverything() {
   const points = [...mapState.markers.values(), ...mapState.candidateMarkers.map((m) => m.marker)].map((m) => m.getLatLng());
-  if (points.length) mapState.map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 13 });
+  if (points.length) mapState.map.fitBounds(L.latLngBounds(points), fitOptions(13));
 }
 
 function setShowCandidates(on) {
   state.showCandidates = !!on;
   $("toggle-candidates").checked = state.showCandidates;
   renderMapMarkers();
-  if (on) loadLocationAnalysis().then(() => { renderCandidateMarkers(); fitMapToEverything(); updateCandidateSelection(null); });
+  if (on) loadLocationAnalysis().then(() => { renderCandidateMarkers(); fitMapToEverything(); updateCandidateSelection(null); updateMapNote(); });
+  else updateMapNote();
   refreshCommandStates();
 }
 
