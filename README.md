@@ -211,9 +211,10 @@ Tick **Show possible locations** in the GPS Locations pane (or View → Show Pos
 * Each candidate appears as a **dashed hollow "?" marker**, never as the solid red dot used for resolved GPS.
 * A small **blue dot** (and blue ring) means the candidate has **supporting** contextual evidence.
 * **Purple** markers are the candidates of the currently **selected** photo.
-* The legend inside the banner uses the same CSS classes as the markers, so it always matches the map. When fitting the view, the map leaves room for the banner so no marker is hidden behind it.
+* The legend uses the same CSS classes as the markers, so it always matches the map. Each entry is on its own line (icon column + text column), so browser zoom cannot misalign them.
 * The tooltip and popup say e.g. *"Possible location — N/W (derived – not confirmed)"*.
-* A banner stays on the map while candidates are shown: *"These locations are derived from ambiguous GPS metadata and are not confirmed locations."*
+* **Warning and legend on hover:** while the mouse is over any map marker, a banner shows *"These locations are derived from ambiguous GPS metadata and are not confirmed locations."* together with the legend. It is hidden otherwise, so it never blocks the map. It opens on the half of the map away from the hovered marker, so it never covers it.
+* **Without hover:** every candidate's own tooltip ("… derived – not confirmed") and popup carry the same warning. On touch screens, tap a candidate to see it.
 
 Candidate markers live in their own map layer (`mapState.candidateMarkers`). They never enter the resolved-GPS dataset, the GPS count, the GPS filter, the status bar or the chronological path.
 
@@ -500,7 +501,7 @@ Use `sample_images/` (file names below) or your own photos.
 | 12 | Several + ZIP | Tick 3 images → **Sanitize ▾ → Sanitize Ticked Images (3)** → **Export ▾ → Ticked Sanitized Images as ZIP** | `sanitized_images.zip` with `name_sanitized.ext` files. Duplicate names become `photo_sanitized.jpg` and `photo_sanitized_2.jpg`. |
 | 13 | GPS hemispheres | Upload `21_gps_south_east_sydney.jpg`, `22_gps_south_west_rio.jpg`, `02_gps_phoenix_morning.jpg` (N/W), `04_gps_berlin.jpg` (N/E) | All four plotted in the right place; Sydney has a negative latitude, Rio has negative latitude and longitude |
 | 14 | Ambiguous GPS | Upload `23_gps_missing_lat_ref.jpg` … `27_xmp_gps_no_hemisphere_letter.jpg` | **No markers.** `GPS ±?` badge, "Ambiguous GPS" tile = 5, status bar "5 ambiguous GPS". The Details GPS column shows raw values with `?` for the unknown hemisphere. Properties → Metadata shows "reference: MISSING" and names the missing tag. The Privacy tab explains why it is not on the map, with no OpenStreetMap link. |
-| 15 | Possible locations | Upload `sample_images/ctf_collection/`, tick **Show possible locations** | Dashed "?" markers appear: 4 for `IMG_4014.JPG`, 2 for `IMG_4016.JPG`. The resolved-marker count, GPS tile, GPS filter and status bar do **not** change, and the warning banner is shown. The N/W candidates of IMG_4012/4014/4016 carry a blue dot (contextual evidence). Untick the box → the map is back to resolved GPS only. |
+| 15 | Possible locations | Upload `sample_images/ctf_collection/`, tick **Show possible locations** | Dashed "?" markers appear: 4 for `IMG_4014.JPG`, 2 for `IMG_4016.JPG`. The resolved-marker count, GPS tile, GPS filter and status bar do **not** change, and hovering a marker shows the warning banner with the legend (one entry per line). The N/W candidates of IMG_4012/4014/4016 carry a blue dot (contextual evidence). Untick the box → the map is back to resolved GPS only. |
 | 16 | Candidate evidence | Select `IMG_4014.JPG` → Properties → **Location** | RAW (both references "missing") / RESOLVED ("none – not resolved") / DERIVED (4 candidates) / INFERENCE. N/W: "A photo from the same device model taken 2 minutes earlier (UTC) has a resolved location 1.1 km from this candidate." N/E: conflict (implausible travel), and the Canon photo is listed only as weak context. Timezone: "unknown – offline timezone boundary data is not installed". Assessment: "Derived candidate · Not confirmed". |
 
 Extra checks:
