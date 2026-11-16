@@ -209,7 +209,9 @@ Kept apart in the backend (`kind` fields in `/api/location-analysis`) and in the
 #### Showing possible locations
 Tick **Show possible locations** in the GPS Locations pane (or View → Show Possible Locations). Then:
 * Each candidate appears as a **dashed hollow "?" marker**, never as the solid red dot used for resolved GPS.
-* A small **blue dot** on the marker means contextual evidence exists for that candidate.
+* A small **blue dot** (and blue ring) means the candidate has **supporting** contextual evidence.
+* **Purple** markers are the candidates of the currently **selected** photo.
+* The legend inside the banner uses the same CSS classes as the markers, so it always matches the map. When fitting the view, the map leaves room for the banner so no marker is hidden behind it.
 * The tooltip and popup say e.g. *"Possible location — N/W (derived – not confirmed)"*.
 * A banner stays on the map while candidates are shown: *"These locations are derived from ambiguous GPS metadata and are not confirmed locations."*
 

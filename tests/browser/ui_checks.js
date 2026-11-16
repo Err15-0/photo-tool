@@ -64,7 +64,7 @@ function listFiles(dir) {
 
   // ---- default view: conservative
   check(await resolvedMarkers() === resolvedCount, `map shows only resolved GPS (${resolvedCount})`);
-  check(await page.locator(".candidate-icon").count() === 0, "no candidate markers by default");
+  check(await page.locator(".leaflet-marker-icon.candidate-icon").count() === 0, "no candidate markers by default");
   check(statusBar.includes(`${resolvedCount} GPS`) && statusBar.includes(`${ambiguousCount} ambiguous GPS`), `status bar: ${statusBar}`);
 
   // ---- filename injection regression
@@ -86,16 +86,16 @@ function listFiles(dir) {
 
   // ---- candidates on
   await page.check("#toggle-candidates");
-  await page.waitForFunction(() => document.querySelectorAll(".candidate-icon").length > 0, null, { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelectorAll(".leaflet-marker-icon.candidate-icon").length > 0, null, { timeout: 30000 });
   await page.waitForTimeout(500);
   const analysis = await page.evaluate(async () => (await fetch("/api/location-analysis")).json());
-  check(await page.locator(".candidate-icon").count() === analysis.counts.candidates, `candidate markers = ${analysis.counts.candidates}`);
+  check(await page.locator(".leaflet-marker-icon.candidate-icon").count() === analysis.counts.candidates, `candidate markers = ${analysis.counts.candidates}`);
   check(await resolvedMarkers() === resolvedCount, "resolved markers unchanged with candidates shown");
   check(await page.locator("#sb-counts").innerText() === statusBar, "status bar unchanged with candidates shown");
   check((await page.locator("#candidate-banner").innerText()).includes("not confirmed locations"), "warning banner shown");
   await page.check('input[data-filter="gps"]');
   await page.waitForTimeout(400);
-  check(await page.locator(".candidate-icon").count() === 0, "resolved-GPS filter never shows candidates");
+  check(await page.locator(".leaflet-marker-icon.candidate-icon").count() === 0, "resolved-GPS filter never shows candidates");
   await page.uncheck('input[data-filter="gps"]');
   await page.waitForTimeout(400);
 
@@ -133,7 +133,7 @@ function listFiles(dir) {
   await page.keyboard.press("Escape");
   await page.uncheck("#toggle-candidates");
   await page.waitForTimeout(400);
-  check(await page.locator(".candidate-icon").count() === 0 && await resolvedMarkers() === resolvedCount, "toggle off restores the resolved-only map");
+  check(await page.locator(".leaflet-marker-icon.candidate-icon").count() === 0 && await resolvedMarkers() === resolvedCount, "toggle off restores the resolved-only map");
 
   check(errors.length === 0, `no JavaScript errors ${errors.length ? JSON.stringify(errors) : ""}`);
   await browser.close();
