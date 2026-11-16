@@ -221,9 +221,11 @@
             <button id="btn-pick-files" class="btn btn-default" type="button">Add Images…</button>
             <button id="btn-pick-folder" class="btn" type="button">Add Folder…</button>
           </div>
-          <input id="input-files" type="file" multiple accept=".jpg,.jpeg,.jpe,.png,.webp,.tif,.tiff,.heic,.heif,image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif" hidden>
-          <input id="input-folder" type="file" multiple webkitdirectory hidden>
         </div>
+        <!-- Hidden file inputs live OUTSIDE #drop-zone: a click on them must not bubble to the
+             drop zone's own "open the image picker" handler (that replaced the folder picker). -->
+        <input id="input-files" type="file" multiple accept=".jpg,.jpeg,.jpe,.png,.webp,.tif,.tiff,.heic,.heif,image/jpeg,image/png,image/webp,image/tiff,image/heic,image/heif" hidden>
+        <input id="input-folder" type="file" multiple webkitdirectory hidden>
         <details id="upload-errors" class="infobar infobar-warn upload-errors hidden">
           <summary><span class="ib-icon warn">!</span> <span id="upload-errors-summary"></span></summary>
           <ul id="upload-errors-list"></ul>
