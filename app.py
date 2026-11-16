@@ -173,6 +173,7 @@ def api_status():
         "sanitize_modes": list(SANITIZE_MODES),
         "heif_available": heif_support.HEIF_AVAILABLE,
         "heic_output_choices": list(config.HEIC_OUTPUT_CHOICES),
+        "timezone_lookup": timezones.get_lookup().info(),
     })
 
 

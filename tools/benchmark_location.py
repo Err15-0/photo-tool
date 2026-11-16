@@ -113,16 +113,26 @@ def synthetic_record(i, ambiguous):
 
 
 def bench_analysis(sizes):
-    print("3) On-demand location analysis (/api/location-analysis), timezone lookup unavailable")
-    for size in sizes:
-        for share in (0.1, 0.5):
-            ambiguous = int(size * share)
-            records = [synthetic_record(i, i < ambiguous) for i in range(size)]
-            t0 = time.perf_counter()
-            result = location_analysis.analyze_collection(records, timezones.UnavailableLookup())
-            dt = time.perf_counter() - t0
-            print(f"   {size:>5} images ({ambiguous:>4} ambiguous × {size - ambiguous:>4} resolved): {dt * 1000:8.1f} ms, "
-                  f"{result['counts']['candidates']} candidates")
+    lookups = [timezones.UnavailableLookup()]
+    installed = timezones.default_lookup()
+    if installed.available:
+        lookups.append(installed)
+        t0 = time.perf_counter()
+        installed.timezones_at(0.0, 0.0)          # one-time finder build
+        print(f"   ({installed.name}: first lookup incl. loading the boundary data {1000 * (time.perf_counter() - t0):.0f} ms)")
+    else:
+        print("   (optional tzfpy not installed - only the 'unavailable' lookup is measured)")
+    for lookup in lookups:
+        print(f"3) On-demand location analysis, timezone lookup: {lookup.name}")
+        for size in sizes:
+            for share in (0.1, 0.5):
+                ambiguous = int(size * share)
+                records = [synthetic_record(i, i < ambiguous) for i in range(size)]
+                t0 = time.perf_counter()
+                result = location_analysis.analyze_collection(records, lookup)
+                dt = time.perf_counter() - t0
+                print(f"   {size:>5} images ({ambiguous:>4} ambiguous × {size - ambiguous:>4} resolved): {dt * 1000:8.1f} ms, "
+                      f"{result['counts']['candidates']} candidates")
 
 
 if __name__ == "__main__":

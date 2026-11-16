@@ -27,6 +27,16 @@ from . import timezones
 
 CANDIDATE_DISCLAIMER = ("These locations are derived from ambiguous GPS metadata and are "
                         "not confirmed locations.")
+ORDERING_RULE = ("Order: candidates WITHOUT conflicting evidence come first; within that, candidates WITH "
+                 "supporting evidence come first. Inside a group the fixed order N/E, N/W, S/E, S/W is kept. "
+                 "No scores, weights or probabilities are used. Weak and unavailable evidence never changes "
+                 "the order.")
+ORDER_GROUPS = {
+    1: "Most contextually supported",
+    2: "No contextual evidence either way",
+    3: "Mixed contextual evidence",
+    4: "Only conflicting contextual evidence",
+}
 COLLECTION_DISCLAIMER = ("Collection context is contextual evidence, not GPS metadata. "
                          "'Same device' means the same make/model string – it can be a "
                          "different physical camera.")
@@ -186,6 +196,14 @@ def _relationship(a, b):
     }
 
 
+def _who(rel):
+    """How a related photo is described. A model match is NOT the same physical device."""
+    if rel["same_serial"]:
+        return ("A photo with the same recorded camera serial number (metadata can be copied, "
+                "so this is not proof of the same physical camera)")
+    return "A photo from the same device model (not necessarily the same physical device)"
+
+
 def _collection_evidence(candidate_vector, a_ctx, resolved, relationships):
     """
     Facts about resolved photos in the collection relative to ONE candidate.
@@ -232,13 +250,14 @@ def _collection_evidence(candidate_vector, a_ctx, resolved, relationships):
     supporting_count, conflicting_count = len(supporting), len(conflicting)
     widest_support = max((item[0] for item in supporting), default=None)
     supporting = [dict(make_entry(ctx, distance), statement=(
-        f"A photo from the same device model taken {_describe_delta(minutes)} "
+        f"{_who(rel)} taken {_describe_delta(minutes)} "
         f"({rel['time_basis']}) has a resolved location {distance:.1f} km from this candidate."))
         for _k, ctx, distance, minutes, rel, _s in sorted(supporting, key=lambda item: item[0])[:STATEMENT_LIMIT]]
     conflicting = [dict(make_entry(ctx, distance), statement=(
-        f"A photo from the same device model taken {_describe_delta(minutes)} has a resolved "
+        f"{_who(rel)} taken {_describe_delta(minutes)} has a resolved "
         f"location {distance:,.0f} km from this candidate (implied travel: "
-        f"{'an instantaneous jump' if math.isinf(speed) else f'{speed:,.0f} km/h'} – implausible if it is the same camera)."))
+        f"{'an instantaneous jump' if math.isinf(speed) else f'{speed:,.0f} km/h'} – implausible only if both "
+        "photos come from the same physical camera)."))
         for _k, ctx, distance, minutes, rel, speed in sorted(conflicting, key=lambda item: item[0])[:STATEMENT_LIMIT]]
 
     if closest_geo is not None:
@@ -269,6 +288,96 @@ def _collection_evidence(candidate_vector, a_ctx, resolved, relationships):
         "related_resolved": related,
         "summary": summary,
     }
+
+
+# =============================================================================
+# Evidence classification + evidence-based ordering (no scores)
+# =============================================================================
+
+def classify_evidence(tz, collection, a_ctx, has_resolved):
+    """
+    Every piece of contextual evidence for ONE candidate, as
+    {"category": supporting|conflicting|weak|unavailable, "source": timezone|collection, "text"}.
+    Only 'supporting' and 'conflicting' can affect the order.
+    """
+    items = []
+
+    def add(category, source, text):
+        items.append({"category": category, "source": source, "text": text})
+
+    # timezone
+    if tz["status"] == "consistent":
+        add("supporting", "timezone", f"Timezone consistent: {tz['timezone']} used UTC{'/'.join(tz['candidate_offsets'])} "
+                                      f"at the capture time; the image records UTC{tz['capture_offset']}.")
+    elif tz["status"] == "inconsistent":
+        add("conflicting", "timezone", f"Timezone inconsistent: {', '.join(z['timezone'] for z in tz['zones'])} used "
+                                       f"UTC{'/'.join(tz['candidate_offsets'])} at the capture time; the image records "
+                                       f"UTC{tz['capture_offset']}.")
+    else:
+        add("unavailable", "timezone", f"Timezone unknown: {tz['reason']}")
+
+    # collection
+    if collection["same_device_resolved_near"]:
+        add("supporting", "collection", collection["supporting"][0]["statement"] + (
+            f" ({collection['same_device_resolved_near']} such photo(s) in total.)"
+            if collection["same_device_resolved_near"] > 1 else ""))
+    if collection["same_device_conflicting"]:
+        add("conflicting", "collection", collection["conflicting"][0]["statement"] + (
+            f" ({collection['same_device_conflicting']} such photo(s) in total.)"
+            if collection["same_device_conflicting"] > 1 else ""))
+    related = collection["related_resolved"]
+    if related and not collection["same_device_resolved_near"] and not collection["same_device_conflicting"]:
+        add("weak", "collection", f"{len(related)}+ resolved photo(s) from the same device model exist, but none within "
+                                  f"{config.CONTEXT_TIME_WINDOW_HOURS} h of this photo – no usable time relationship.")
+    geo = collection["closest_geographic_match"]
+    if geo and not (geo["relationship"]["same_device_model"] or geo["relationship"]["same_serial"]):
+        add("weak", "collection", f"Closest resolved photo ({geo['distance_km']:,.1f} km) is from a different/unknown "
+                                  f"device ({geo['device'] or 'no device info'}) – geographic proximity only.")
+    if not has_resolved:
+        add("unavailable", "collection", "No photo in this collection has resolved GPS.")
+    elif not related:
+        add("unavailable", "collection", "No resolved photo from the same device model in this collection.")
+    if a_ctx["local"] is None and related:
+        add("unavailable", "collection", "This photo has no capture time, so time relationships cannot be evaluated.")
+    return items
+
+
+def order_candidates(candidates):
+    """
+    Sort IN PLACE by evidence, without any score:
+        group 1  supporting evidence, no conflicting evidence
+        group 2  neither
+        group 3  both supporting and conflicting
+        group 4  conflicting only
+    Stable sort -> inside a group the generated order (N/E, N/W, S/E, S/W) is kept.
+    Every candidate stays in the list.
+    """
+    for index, candidate in enumerate(candidates):
+        support = candidate["assessment"]["supporting_signals"]
+        conflict = candidate["assessment"]["conflicting_signals"]
+        group = (3 if support else 4) if conflict else (1 if support else 2)
+        reason = []
+        reason.append("no conflicting evidence" if not conflict else f"conflicting evidence: {len(conflict)} item(s)")
+        reason.append(f"supporting evidence: {len(support)} item(s)" if support else "no supporting evidence")
+        candidate["order"] = {
+            "group": group,
+            "label": ORDER_GROUPS[group],
+            "generated_position": index + 1,
+            "reason": f"{ORDER_GROUPS[group]} – " + "; ".join(reason) + ".",
+        }
+    candidates.sort(key=lambda c: c["order"]["group"])
+    for position, candidate in enumerate(candidates, start=1):
+        candidate["order"]["position"] = position
+    top = [c["id"] for c in candidates if c["order"]["group"] == 1]
+    if not top:
+        note = "No candidate has supporting contextual evidence, so none is marked as most supported."
+    elif len(top) > 1:
+        note = (f"{len(top)} candidates ({', '.join(top)}) have supporting and no conflicting evidence – "
+                "the evidence does not distinguish between them.")
+    else:
+        note = (f"{top[0]} has supporting and no conflicting contextual evidence. This is an inference from the "
+                "available context, NOT a resolved or confirmed location.")
+    return {"rule": ORDERING_RULE, "note": note, "most_supported": top}
 
 
 # =============================================================================
@@ -347,23 +456,17 @@ def analyze_collection(records, lookup=None):
             tz = timezones.evaluate(candidate["latitude"], candidate["longitude"], n.get("capture_time") or {}, lookup)
             collection = _collection_evidence(_unit_vector(candidate["latitude"], candidate["longitude"]),
                                               a_ctx, resolved_points, relationships)
-            support = []
-            if tz["status"] == "consistent":
-                support.append("timezone consistent")
-            if collection["supporting"]:
-                support.append(f"{collection['same_device_resolved_near']} nearby same-device photo(s)")
-            conflicts = []
-            if tz["status"] == "inconsistent":
-                conflicts.append("timezone inconsistent")
-            if collection["conflicting"]:
-                conflicts.append(f"{collection['same_device_conflicting']} same-device photo(s) imply implausible travel")
-            candidates.append(dict(candidate, timezone=tz, collection=collection, assessment={
+            evidence = classify_evidence(tz, collection, a_ctx, has_resolved=bool(resolved_points))
+            support = [e["text"] for e in evidence if e["category"] == "supporting"]
+            conflicts = [e["text"] for e in evidence if e["category"] == "conflicting"]
+            candidates.append(dict(candidate, timezone=tz, collection=collection, evidence=evidence, assessment={
                 "kind": "assessment",
                 "status": "Derived candidate – not confirmed",
                 "has_contextual_support": bool(support),
                 "supporting_signals": support,
                 "conflicting_signals": conflicts,
             }))
+        ordering = order_candidates(candidates)
         total_candidates += len(candidates)
         pattern = pattern_by_image.get(record.id)
         images[record.id] = {
@@ -388,7 +491,8 @@ def analyze_collection(records, lookup=None):
                 "message": n.get("gps_message"),
             },
             "capture_time": n.get("capture_time"),
-            "candidates": candidates,   # 3. DERIVED + 4. CONTEXTUAL (nested per candidate)
+            "candidates": candidates,   # 3. DERIVED + 4. CONTEXTUAL (nested per candidate), evidence-ordered
+            "ordering": ordering,
             "pattern": None if not pattern or pattern["count"] < 2 else {
                 "statement": pattern["statement"], "count": pattern["count"], "disclaimer": PATTERN_DISCLAIMER,
             },
@@ -402,7 +506,8 @@ def analyze_collection(records, lookup=None):
             "collection": COLLECTION_DISCLAIMER,
             "patterns": PATTERN_DISCLAIMER,
         },
-        "timezone_lookup": {"available": lookup.available, "name": lookup.name, "description": lookup.description},
+        "timezone_lookup": lookup.info(),
+        "ordering_rule": ORDERING_RULE,
         "rules": {
             "context_time_window_hours": config.CONTEXT_TIME_WINDOW_HOURS,
             "context_distance_km": config.CONTEXT_DISTANCE_KM,

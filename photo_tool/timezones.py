@@ -4,10 +4,18 @@ CAPTURE DATE match the offset recorded in the image?
 
 Two separate problems:
 
-1. coordinate -> IANA timezone name ("America/New_York")
-   Needs timezone BOUNDARY data. This is pluggable (TimezoneLookup). The
-   default is UnavailableLookup: Photo Tool ships no boundary dataset yet and
-   NEVER calls an online service. Result: "Timezone unknown" with a reason.
+1. coordinate -> IANA timezone name(s) ("America/New_York")
+   Needs timezone BOUNDARY data. Pluggable (TimezoneLookup):
+     * TzfpyLookup - used automatically when the OPTIONAL package tzfpy is
+       installed (pip install -r requirements-timezone.txt). Fully offline:
+       the boundary data is compiled into the package. Boundary data:
+       timezone-boundary-builder / OpenStreetMap contributors, ODbL 1.0.
+     * UnavailableLookup - when tzfpy is missing (or disabled with
+       PHOTO_TOOL_TIMEZONE_LOOKUP=off): every result is "Timezone unknown".
+   Photo Tool NEVER calls an online timezone/geolocation service.
+   Some places use more than one local time (e.g. Xinjiang: Beijing time
+   Asia/Shanghai UTC+8 and Xinjiang time Asia/Urumqi UTC+6). tzfpy returns
+   ALL overlapping zones and every one of them is checked.
 
 2. IANA name + local date/time -> UTC offset, with historical DST rules
    Python's standard library (zoneinfo) + the operating system's IANA tz
@@ -21,6 +29,7 @@ Timezone consistency is CONTEXTUAL EVIDENCE. It never resolves a coordinate,
 and the sign of an offset is never used to guess a hemisphere.
 """
 
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -30,29 +39,97 @@ DISCLAIMER = "Timezone consistency is contextual evidence and does not confirm t
 
 
 class TimezoneLookup:
-    """Interface: coordinate -> IANA timezone name (or None). Must work OFFLINE."""
+    """Interface: coordinate -> IANA timezone names. Must work OFFLINE."""
 
     available = False
     name = "none"
     description = ""
+    version = None
+    data_version = None
+    attribution = None
+
+    def timezones_at(self, latitude, longitude):
+        """All IANA zone names that apply at this point ([] if none / unknown)."""
+        single = self.timezone_at(latitude, longitude)
+        return [single] if single else []
 
     def timezone_at(self, latitude, longitude):
         raise NotImplementedError
 
+    def info(self):
+        return {"available": self.available, "name": self.name, "description": self.description,
+                "version": self.version, "data_version": self.data_version, "attribution": self.attribution}
+
 
 class UnavailableLookup(TimezoneLookup):
-    """Default: no boundary dataset installed -> every lookup is 'unknown'."""
+    """No boundary data -> every lookup is 'unknown'. Default when tzfpy is missing."""
 
     available = False
     name = "unavailable"
-    description = ("Offline timezone boundary data is not installed, so candidate "
-                   "timezones cannot be determined (see README: Timezone consistency).")
+
+    def __init__(self, description=None):
+        self.description = description or (
+            "Optional offline timezone support is not installed, so candidate timezones cannot be "
+            "determined. Install it with: pip install -r requirements-timezone.txt")
 
     def timezone_at(self, latitude, longitude):
         return None
 
 
-_lookup = UnavailableLookup()
+TZFPY_ATTRIBUTION = ("Timezone boundaries: © OpenStreetMap contributors, timezone-boundary-builder "
+                     "(Evan Siroky), via tzf/tzfpy – Open Database License (ODbL) 1.0")
+
+
+class TzfpyLookup(TimezoneLookup):
+    """
+    Offline coordinate -> IANA zone lookup with the optional `tzfpy` package.
+    Only zone NAMES come from tzfpy; UTC offsets always come from zoneinfo.
+    The finder is built lazily on the first lookup (~50 ms).
+    """
+
+    available = True
+    name = "tzfpy"
+    attribution = TZFPY_ATTRIBUTION
+
+    def __init__(self, module):
+        import importlib.metadata
+        self._tzfpy = module
+        try:
+            self.version = importlib.metadata.version("tzfpy")
+        except importlib.metadata.PackageNotFoundError:
+            self.version = getattr(module, "__version__", "unknown")
+        try:
+            self.data_version = module.data_version()
+        except Exception:
+            self.data_version = "unknown"
+        self.description = (f"Offline lookup with tzfpy {self.version} (boundary data {self.data_version}); "
+                            "no network access")
+
+    def timezones_at(self, latitude, longitude):
+        try:
+            # NOTE: tzfpy takes (longitude, latitude).
+            names = self._tzfpy.get_tzs(longitude, latitude)
+        except Exception:
+            return []
+        return [name for name in names if name]
+
+    def timezone_at(self, latitude, longitude):
+        names = self.timezones_at(latitude, longitude)
+        return names[0] if names else None
+
+
+def default_lookup():
+    """tzfpy if installed (and not disabled), otherwise 'unavailable'."""
+    if os.environ.get("PHOTO_TOOL_TIMEZONE_LOOKUP", "").strip().lower() in ("off", "none", "0", "false"):
+        return UnavailableLookup("Timezone lookup disabled (PHOTO_TOOL_TIMEZONE_LOOKUP=off).")
+    try:
+        import tzfpy
+    except ImportError:
+        return UnavailableLookup()
+    return TzfpyLookup(tzfpy)
+
+
+_lookup = default_lookup()
 
 
 def get_lookup():
@@ -60,9 +137,9 @@ def get_lookup():
 
 
 def set_lookup(lookup):
-    """Install a lookup backend (used by tests; a real offline backend can be added later)."""
+    """Install a lookup backend. None -> back to the default (tzfpy if installed)."""
     global _lookup
-    _lookup = lookup or UnavailableLookup()
+    _lookup = lookup or default_lookup()
 
 
 def offsets_at(tz_name, local_time):
@@ -96,6 +173,8 @@ def evaluate(latitude, longitude, capture, lookup=None):
         "candidate_offsets": [], "capture_offset": capture.get("offset"),
         "capture_local": capture.get("local"), "capture_basis": capture.get("basis"),
         "note": None, "kind": "contextual_evidence", "disclaimer": DISCLAIMER,
+        "timezones": [], "zones": [], "matching_timezones": [],
+        "lookup": lookup.name, "attribution": lookup.attribution,
     }
     if capture.get("local") is None:
         result["reason"] = "No capture timestamp – the offset at the capture date cannot be evaluated"
@@ -108,23 +187,44 @@ def evaluate(latitude, longitude, capture, lookup=None):
         result["reason"] = lookup.description
         return result
 
-    tz_name = lookup.timezone_at(latitude, longitude)
-    result["timezone"] = tz_name
-    if not tz_name:
+    names = lookup.timezones_at(latitude, longitude)
+    civil = [name for name in names if not name.startswith("Etc/")]
+    result["timezones"] = names
+    result["timezone"] = civil[0] if civil else (names[0] if names else None)
+    if not names:
         result["reason"] = "No timezone found for this coordinate"
         return result
-    if tz_name.startswith("Etc/"):
-        # Ocean areas only have theoretical nautical zones (Etc/GMT+5 = UTC-05:00).
-        # Matching one would look like support for an open-ocean candidate.
-        result["reason"] = f"Open ocean / no civil timezone ({tz_name} is a nautical zone) – not evaluated"
+    if not civil:
+        # Ocean / polar areas only have theoretical nautical zones (Etc/GMT+5 = UTC-05:00).
+        # Matching one would look like support for an open-ocean candidate -> not used as evidence.
+        result["reason"] = (f"Open ocean / no civil timezone ({', '.join(names)} is a nautical zone) – "
+                            "not used as evidence")
         return result
 
     local_time = datetime.strptime(capture["local"], "%Y-%m-%dT%H:%M:%S")
-    offsets, note = offsets_at(tz_name, local_time)
-    if offsets is None:
-        result["reason"] = note
+    per_zone, notes, matching = [], [], []
+    for name in civil:
+        offsets, note = offsets_at(name, local_time)
+        if offsets is None:
+            notes.append(note)
+            continue
+        if note:
+            notes.append(f"{name}: {note}")
+        per_zone.append({"timezone": name, "offsets": [format_offset(m) for m in sorted(offsets)]})
+        if capture["offset_minutes"] in offsets:
+            matching.append(name)
+    if not per_zone:
+        result["reason"] = "; ".join(notes)
         return result
-    result["candidate_offsets"] = [format_offset(m) for m in sorted(offsets)]
-    result["note"] = note
-    result["status"] = "consistent" if capture["offset_minutes"] in offsets else "inconsistent"
+    result["zones"] = per_zone
+    result["candidate_offsets"] = sorted({o for zone in per_zone for o in zone["offsets"]})
+    if len(per_zone) > 1:
+        notes.append("More than one local time is in use at this location (" + ", ".join(
+            f"{zone['timezone']} UTC{'/'.join(zone['offsets'])}" for zone in per_zone)
+            + "); the recorded offset is compared with each of them.")
+    result["note"] = " ".join(notes) or None
+    result["matching_timezones"] = matching
+    if matching:
+        result["timezone"] = matching[0]
+    result["status"] = "consistent" if matching else "inconsistent"
     return result
