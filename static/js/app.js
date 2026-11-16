@@ -97,6 +97,9 @@ const state = {
   serverStatus: null,        // /api/status (ExifTool version, limits...)
   nameCounts: new Map(),   // derived: filename -> count (duplicate names)
   hashCounts: new Map(),   // derived: sha256 -> count (identical files)
+  showCandidates: false,   // "Show possible locations" (ambiguous GPS) – OFF by default
+  locationAnalysis: null,  // /api/location-analysis result (derived + contextual, never "resolved")
+  locationAnalysisToken: 0,
 };
 
 // Leaflet objects (created lazily the first time the workspace is shown)
@@ -105,7 +108,9 @@ const mapState = {
   tiles: null,
   markerLayer: null,
   pathLayer: null,
-  markers: new Map(),      // id -> L.circleMarker
+  markers: new Map(),      // id -> L.circleMarker  – RESOLVED GPS ONLY
+  candidateLayer: null,    // derived candidate markers (separate layer)
+  candidateMarkers: [],    // [{marker, imageId, candidate}] – NEVER mixed into `markers`
 };
 
 // ==========================================================================
@@ -235,6 +240,7 @@ function storeImages(summaries) {
     state.details.delete(summary.id);       // cached detail is now outdated
   }
   recomputeDerived();
+  invalidateLocationAnalysis();
 }
 
 function recomputeDerived() {
@@ -598,6 +604,7 @@ function ensureMap() {
   mapState.map = L.map("map", { worldCopyJump: true, zoomControl: true }).setView([20, 0], 2);
   mapState.markerLayer = L.layerGroup().addTo(mapState.map);
   mapState.pathLayer = L.layerGroup();
+  mapState.candidateLayer = L.layerGroup().addTo(mapState.map);
   const tilesEnabled = safeLocalStorageGet("photoTool.tiles", "1") === "1";
   $("toggle-map-tiles").checked = tilesEnabled;
   setTilesEnabled(tilesEnabled);
@@ -655,7 +662,8 @@ function renderMapMarkers() {
     const marker = L.circleMarker([img.normalized.gps_latitude, img.normalized.gps_longitude], markerStyle(false));
     marker.imageId = img.id;                         // association marker -> image
     marker.bindPopup(() => buildPopup(img), { maxWidth: 320 });
-    marker.bindTooltip(img.filename, { direction: "top", offset: [0, -6] });
+    // Leaflet treats STRING tooltip content as HTML -> always pass a DOM node for untrusted text.
+    marker.bindTooltip(h("span", null, img.filename), { direction: "top", offset: [0, -6] });
     marker.on("click", () => selectImage(img.id, "map"));
     marker.addTo(mapState.markerLayer);
     mapState.markers.set(img.id, marker);
@@ -670,7 +678,11 @@ function renderMapMarkers() {
       ? `No resolvable GPS locations. ${ambiguousCount} image(s) have GPS coordinates with a missing hemisphere reference – not plotted.`
       : "No GPS metadata found in this batch.";
   $("map-empty").classList.toggle("hidden", withGps.length > 0);
-  if (!state.selectedId) fitMapToMarkers();
+  renderCandidateMarkers();     // derived candidates: separate layer, only when enabled
+  if (!state.selectedId) {
+    if (state.showCandidates && mapState.candidateMarkers.length) fitMapToEverything();
+    else fitMapToMarkers();
+  }
   updateMapNote();
 }
 
@@ -696,7 +708,7 @@ function renderMapPaths(withGps) {
     const line = L.polyline(imgs.map((img) => [img.normalized.gps_latitude, img.normalized.gps_longitude]), {
       color: colors[colorIndex++ % colors.length], weight: 2, dashArray: "6 6", opacity: 0.9,
     });
-    line.bindTooltip(`${device}: ${imgs.length} photos, ${imgs[0].normalized.timestamp} → ${imgs[imgs.length - 1].normalized.timestamp}`, { sticky: true });
+    line.bindTooltip(h("span", null, `${device}: ${imgs.length} photos, ${imgs[0].normalized.timestamp} → ${imgs[imgs.length - 1].normalized.timestamp}`), { sticky: true });
     line.addTo(mapState.pathLayer);
   }
   mapState.pathLayer.addTo(map);
@@ -722,6 +734,377 @@ function updateMapNote() {
   if (sel && sel.flags.gps_ambiguous) notes.push("The selected image has GPS coordinates but no usable hemisphere reference, so it is not on the map.");
   else if (sel && !sel.flags.gps) notes.push("The selected image has no resolved GPS coordinates.");
   $("map-note").textContent = notes.join(" ");
+}
+
+// --------------------------------------------------------------------------
+// Ambiguous-GPS investigation: derived candidates on the map + evidence views
+// --------------------------------------------------------------------------
+// EVIDENCE MODEL (kept visually distinct everywhere):
+//   RAW METADATA       what is in the file              grey,  "RAW"
+//   RESOLVED METADATA  supported by authoritative tags  green, "FACT"
+//   DERIVED CANDIDATES possible coordinates             amber dashed, "DERIVED"
+//   CONTEXTUAL EVIDENCE timezone / collection clues     blue dotted, "INFERENCE"
+// Candidate markers live in mapState.candidateLayer / candidateMarkers ONLY.
+// They are never added to mapState.markers (the resolved-GPS dataset), never
+// counted, never filtered as "GPS", and never change normalized.gps_status.
+
+let locationAnalysisPromise = null;
+
+/** Fetch /api/location-analysis once per workspace state (computed on demand). */
+function loadLocationAnalysis() {
+  if (state.locationAnalysis) return Promise.resolve(state.locationAnalysis);
+  if (!locationAnalysisPromise) {
+    const token = state.locationAnalysisToken;
+    locationAnalysisPromise = api("/api/location-analysis")
+      .then((data) => {
+        if (token === state.locationAnalysisToken) state.locationAnalysis = data;
+        return data;
+      })
+      .finally(() => { locationAnalysisPromise = null; });
+  }
+  return locationAnalysisPromise;
+}
+
+function invalidateLocationAnalysis() {
+  state.locationAnalysis = null;
+  state.locationAnalysisToken += 1;
+}
+
+function candidateIcon(candidate, selected) {
+  const a = candidate.assessment;
+  const classes = ["candidate-icon"];
+  if (a.has_contextual_support) classes.push("has-support");
+  if (a.conflicting_signals.length) classes.push("has-conflict");
+  if (selected) classes.push("selected");
+  // html is a CONSTANT "?" - no metadata is ever placed in marker HTML.
+  return L.divIcon({ className: classes.join(" "), html: "?", iconSize: [20, 20], iconAnchor: [10, 10] });
+}
+
+function buildCandidatePopup(image, candidate) {
+  const tz = candidate.timezone;
+  const coll = candidate.collection;
+  return h("div", { class: "popup candidate-popup" },
+    h("div", null,
+      h("div", { class: "popup-name" }, candidate.label),
+      h("div", { class: "derived-warning" }, "⚠ ", state.locationAnalysis.disclaimers.candidates),
+      h("div", { class: "popup-line" }, `Order #${candidate.order.position} of ${image.candidates.length}: ${candidate.order.label}${candidate.order.group === 1 ? " (inference, not confirmation)" : ""}`),
+      h("div", { class: "popup-line mono" }, candidate.display),
+      h("div", { class: "popup-line" }, `From: ${image.filename}`),
+      h("div", { class: "popup-line" }, `Latitude: ${candidate.latitude_basis}`),
+      h("div", { class: "popup-line" }, `Longitude: ${candidate.longitude_basis}`),
+      h("div", { class: "popup-line" }, `Timezone: ${tzStatusText(tz)}`),
+      coll.summary.map((line) => h("div", { class: "popup-line" }, line)),
+      coll.conflicting.length ? h("div", { class: "popup-line" }, `${coll.conflicting.length} conflicting same-device photo(s)`) : null,
+      h("button", {
+        type: "button", class: "btn btn-small", style: "margin-top:4px",
+        onclick: () => { state.propertiesTab = "location"; selectImage(image.id, "candidate"); },
+      }, "Open evidence")));
+}
+
+function tzStatusText(tz) {
+  const label = { consistent: "Timezone consistent", inconsistent: "Timezone inconsistent", unknown: "Timezone unknown" }[tz.status];
+  return tz.status === "unknown" ? `${label} – ${tz.reason}` : `${label} (${tz.timezone}, ${tz.candidate_offsets.join(" / ")} vs recorded ${tz.capture_offset})`;
+}
+
+/** Draw derived candidates (only while "Show possible locations" is on). */
+function renderCandidateMarkers() {
+  if (!mapState.map) return;
+  mapState.candidateLayer.clearLayers();
+  mapState.candidateMarkers = [];
+  const showing = state.showCandidates;
+  $("candidate-banner").classList.toggle("hidden", !showing);
+  if (!showing) return;
+  if (!state.locationAnalysis) {
+    loadLocationAnalysis().then(() => { renderCandidateMarkers(); refreshCandidateBanner(); })
+      .catch((error) => toast(`Could not load location analysis: ${error.message}`, "error"));
+    return;
+  }
+  const visibleIds = new Set(visibleImages().filter((img) => img.flags.gps_ambiguous).map((img) => img.id));
+  for (const image of Object.values(state.locationAnalysis.images)) {
+    if (!visibleIds.has(image.id)) continue;
+    for (const candidate of image.candidates) {
+      const marker = L.marker([candidate.latitude, candidate.longitude], {
+        icon: candidateIcon(candidate, image.id === state.selectedId),
+        keyboard: false,
+        title: "",   // no native tooltip with untrusted text
+      });
+      marker.bindTooltip(h("span", null, `${candidate.label} (derived – not confirmed)`), { direction: "top", offset: [0, -10] });
+      marker.bindPopup(() => buildCandidatePopup(image, candidate), { maxWidth: 340 });
+      marker.on("click", () => selectImage(image.id, "candidate"));
+      marker.addTo(mapState.candidateLayer);
+      mapState.candidateMarkers.push({ marker, imageId: image.id, candidate });
+    }
+  }
+  refreshCandidateBanner();
+  // Do not let the "no GPS" overlay hide the candidates.
+  if (mapState.candidateMarkers.length) $("map-empty").classList.add("hidden");
+}
+
+function refreshCandidateBanner() {
+  const count = mapState.candidateMarkers.length;
+  const images = new Set(mapState.candidateMarkers.map((m) => m.imageId)).size;
+  $("candidate-banner-count").textContent = state.locationAnalysis
+    ? `${count} possible location(s) for ${images} image(s) with ambiguous GPS.`
+    : "Loading possible locations…";
+}
+
+function updateCandidateSelection(source) {
+  const id = state.selectedId;
+  const selected = [];
+  for (const entry of mapState.candidateMarkers) {
+    const isSelected = entry.imageId === id;
+    entry.marker.setIcon(candidateIcon(entry.candidate, isSelected));
+    if (isSelected) selected.push(entry.marker);
+  }
+  if (source && source !== "candidate" && selected.length && mapState.map) {
+    mapState.map.closePopup();
+    mapState.map.fitBounds(L.latLngBounds(selected.map((m) => m.getLatLng())), { padding: [50, 50], maxZoom: 6 });
+  }
+}
+
+function fitMapToEverything() {
+  const points = [...mapState.markers.values(), ...mapState.candidateMarkers.map((m) => m.marker)].map((m) => m.getLatLng());
+  if (points.length) mapState.map.fitBounds(L.latLngBounds(points), { padding: [40, 40], maxZoom: 13 });
+}
+
+function setShowCandidates(on) {
+  state.showCandidates = !!on;
+  $("toggle-candidates").checked = state.showCandidates;
+  renderMapMarkers();
+  if (on) loadLocationAnalysis().then(() => { renderCandidateMarkers(); fitMapToEverything(); updateCandidateSelection(null); });
+  refreshCommandStates();
+}
+
+function showCandidateOnMap(imageId, candidateId) {
+  const focus = () => {
+    const entry = mapState.candidateMarkers.find((m) => m.imageId === imageId && m.candidate.id === candidateId);
+    if (!entry) return;
+    $("map-section").scrollIntoView({ block: "nearest" });
+    mapState.map.setView(entry.marker.getLatLng(), 9);
+    entry.marker.openPopup();
+  };
+  if (!state.showCandidates) {
+    state.showCandidates = true;
+    $("toggle-candidates").checked = true;
+    renderMapMarkers();
+    loadLocationAnalysis().then(() => { renderCandidateMarkers(); focus(); });
+  } else {
+    focus();
+  }
+}
+
+// ---------------------------------------------------------------- evidence UI
+
+function evidenceBlock(kind, title, ...children) {
+  const tags = { raw: "RAW METADATA", resolved: "RESOLVED METADATA", derived: "DERIVED – NOT METADATA", context: "CONTEXTUAL EVIDENCE – INFERENCE", capture: "RAW METADATA" };
+  return h("div", { class: `evidence ev-${kind}` },
+    h("div", { class: "ev-head" }, h("span", { class: "ev-tag" }, tags[kind]), h("span", { class: "ev-title" }, title)),
+    h("div", { class: "ev-body" }, children));
+}
+
+function evidenceLegend() {
+  return h("div", { class: "ev-legend small" },
+    h("span", { class: "ev-chip ev-raw" }, "RAW"), " in the file · ",
+    h("span", { class: "ev-chip ev-resolved" }, "FACT"), " resolved from authoritative metadata · ",
+    h("span", { class: "ev-chip ev-derived" }, "DERIVED"), " mathematically possible · ",
+    h("span", { class: "ev-chip ev-context" }, "INFERENCE"), " contextual evidence");
+}
+
+function refLine(name, raw, problem, letter) {
+  if (problem === "missing") return [name || "Reference", h("strong", { class: "st-still_present" }, "missing")];
+  if (problem === "invalid") return [name || "Reference", h("strong", { class: "st-still_present" }, `malformed (${JSON.stringify(raw)}) – not interpreted`)];
+  return [name || "Reference", letter || raw || "-"];
+}
+
+function kvTable(rows) {
+  return h("table", { class: "kv" }, h("tbody", null, rows.map(([label, value]) =>
+    h("tr", null, h("th", null, label), h("td", { class: value === null || value === undefined || value === "" ? "absent" : "" },
+      value === null || value === undefined || value === "" ? "-" : value)))));
+}
+
+function tzPill(status) {
+  const text = { consistent: "Timezone consistent", inconsistent: "Timezone inconsistent", unknown: "Timezone unknown" }[status];
+  return h("span", { class: `tz-pill tz-${status}` }, text);
+}
+
+function buildCandidateCard(image, candidate, analysis) {
+  const tz = candidate.timezone;
+  const coll = candidate.collection;
+  const a = candidate.assessment;
+  const relatedRow = (entry, label) => entry ? h("span", null,
+    h("a", { href: "#", onclick: (e) => { e.preventDefault(); selectImage(entry.id, "inspector"); } }, entry.filename),
+    ` – ${label}`) : null;
+  const tm = coll.closest_temporal_match;
+  const gm = coll.closest_geographic_match;
+  const order = candidate.order || {};
+  return h("div", { class: `candidate-card ${a.has_contextual_support ? "has-support" : ""} order-group-${order.group}` },
+    h("div", { class: "candidate-head" },
+      h("span", { class: "order-pos", title: "Position in the evidence-based order (not a score)" }, `#${order.position}`),
+      h("span", { class: "candidate-dot", "aria-hidden": "true" }, "?"),
+      h("strong", null, candidate.label),
+      h("span", { class: "mono" }, candidate.display),
+      h("button", { type: "button", class: "btn btn-small", onclick: () => showCandidateOnMap(image.id, candidate.id) }, "Show on map")),
+    h("div", { class: "order-line" },
+      h("span", { class: `order-badge og-${order.group}` }, order.label, order.group === 1 ? " · inference" : ""),
+      h("span", { class: "small" }, ` Why here: ${order.reason}`)),
+    evidenceBlock("raw", "Metadata evidence", kvTable([
+      ["Latitude", candidate.latitude_basis],
+      ["Longitude", candidate.longitude_basis],
+    ])),
+    evidenceBlock("context", "Timezone evidence", kvTable([
+      ["Capture offset", tz.capture_offset ? `UTC${tz.capture_offset}` : null],
+      ["Capture time (local)", tz.capture_local ? tz.capture_local.replace("T", " ") : null],
+      ["Candidate timezone", tz.timezone],
+      ["Candidate offset at capture time", tz.candidate_offsets.length ? tz.candidate_offsets.map((o) => `UTC${o}`).join(" / ") : null],
+      ["Status", tzPill(tz.status)],
+      ["Zones at this point", tz.zones && tz.zones.length > 1 ? tz.zones.map((z) => `${z.timezone} (UTC${z.offsets.join("/")})`).join(", ") : null],
+      ["Why unknown", tz.status === "unknown" ? tz.reason : null],
+      ["Note", tz.note],
+    ]), h("div", { class: "ev-disclaimer" }, analysis.disclaimers.timezone),
+      tz.attribution && tz.timezones && tz.timezones.length ? h("div", { class: "attribution" }, tz.attribution) : null),
+    evidenceBlock("context", "Collection evidence",
+      kvTable([
+        [`Same-device-MODEL resolved photos ≤ ${analysis.rules.context_time_window_hours} h and ≤ ${analysis.rules.context_distance_km} km`, String(coll.same_device_resolved_near)],
+        ["Closest same-device-model photo in time", tm ? relatedRow(tm, `${describeMinutes(tm.relationship.time_delta_minutes)}, ${tm.distance_km.toLocaleString()} km from this candidate${tm.relationship.same_serial ? " (same recorded serial number)" : ""}`) : null],
+        ["Closest resolved photo (any device)", gm ? relatedRow(gm, `${gm.distance_km.toLocaleString()} km, ${gm.relationship.same_device_model ? "same device model" : "different/unknown device"}`) : null],
+      ]),
+      coll.supporting.length ? h("ul", { class: "ev-list support" }, coll.supporting.map((s) => h("li", null, s.statement))) : null,
+      coll.conflicting.length ? h("ul", { class: "ev-list conflict" }, coll.conflicting.map((s) => h("li", null, s.statement))) : null,
+      coll.summary.length ? h("ul", { class: "ev-list" }, coll.summary.map((s) => h("li", null, s))) : null,
+      h("div", { class: "ev-disclaimer" }, analysis.disclaimers.collection)),
+    h("div", { class: "assessment" },
+      h("strong", null, "Assessment: "), "Derived candidate · Not confirmed",
+      evidenceSummary(candidate.evidence || [])));
+}
+
+const EVIDENCE_CATEGORIES = [
+  ["supporting", "+", "Supporting"],
+  ["conflicting", "−", "Conflicting"],
+  ["weak", "~", "Weak (not used for ordering)"],
+  ["unavailable", "?", "Unavailable (not used for ordering)"],
+];
+
+/** All contextual evidence of one candidate, grouped by category. */
+function evidenceSummary(evidence) {
+  return h("div", { class: "evidence-summary" }, EVIDENCE_CATEGORIES.map(([category, sign, label]) => {
+    const items = evidence.filter((e) => e.category === category);
+    return h("div", { class: `ev-cat ev-cat-${category}` },
+      h("span", { class: "ev-cat-label" }, h("span", { class: "ev-sign" }, sign), ` ${label} (${items.length})`),
+      items.length ? h("ul", null, items.map((e) => h("li", null, h("span", { class: "ev-src" }, `${e.source}: `), e.text))) : null);
+  }));
+}
+
+function describeMinutes(minutes) {
+  if (minutes === null || minutes === undefined) return "unknown time difference";
+  const size = Math.abs(minutes);
+  const text = size < 120 ? `${Math.round(size)} min` : `${(size / 60).toFixed(1)} h`;
+  return size < 0.5 ? "same time" : `${text} ${minutes > 0 ? "later" : "earlier"}`;
+}
+
+/** Properties → Location tab for one image. */
+function buildLocationTab(img, detail) {
+  const n = detail.normalized || {};
+  const nodes = [evidenceLegend()];
+  const capture = n.capture_time || {};
+  const captureBlock = evidenceBlock("capture", "Capture time", kvTable([
+    ["Local capture time", capture.local ? capture.local.replace("T", " ") : null],
+    ["UTC offset", capture.offset ? `UTC${capture.offset}` : null],
+    ["Basis", capture.basis],
+    ["Problems", (capture.problems || []).join("; ") || null],
+  ]));
+
+  if (!n.gps_status) {
+    nodes.push(evidenceBlock("raw", "GPS metadata", h("p", null, "No GPS metadata in this file.")), captureBlock);
+    return nodes;
+  }
+  const lat = refLine(n.gps_latitude_ref_name || "GPSLatitudeRef", n.gps_latitude_ref_raw, n.gps_latitude_ref_problem, n.gps_latitude_ref);
+  const lon = refLine(n.gps_longitude_ref_name || "GPSLongitudeRef", n.gps_longitude_ref_raw, n.gps_longitude_ref_problem, n.gps_longitude_ref);
+  nodes.push(evidenceBlock("raw", "GPS metadata", kvTable([
+    ["Latitude magnitude", n.gps_raw_latitude !== null && n.gps_raw_latitude !== undefined ? `${n.gps_raw_latitude}°` : null],
+    ["Longitude magnitude", n.gps_raw_longitude !== null && n.gps_raw_longitude !== undefined ? `${n.gps_raw_longitude}°` : null],
+    lat, lon,
+    ["Source", n.gps_source],
+  ])));
+
+  if (n.gps_status === "valid") {
+    nodes.push(evidenceBlock("resolved", "Resolved location", kvTable([
+      ["Coordinates", formatGps(img)],
+      ["Status", GPS_STATUS_LABELS.valid],
+    ])), captureBlock);
+    return nodes;
+  }
+  nodes.push(evidenceBlock("resolved", "Resolved location", kvTable([
+    ["Coordinates", h("span", { class: "st-still_present" }, "none – not resolved")],
+    ["Status", GPS_STATUS_LABELS[n.gps_status] || n.gps_status],
+    ["Why", n.gps_message],
+  ])), captureBlock);
+  if (n.gps_status !== "ambiguous") return nodes;
+
+  const holder = h("div", null, h("div", { class: "muted" }, h("span", { class: "spinner" }), " Building candidate analysis…"));
+  nodes.push(holder);
+  const render = (analysis) => {
+    const image = analysis.images[img.id];
+    if (!image) { holder.replaceChildren(h("div", { class: "muted" }, "No candidates.")); return; }
+    holder.replaceChildren(
+      evidenceBlock("derived", `Possible locations (${image.candidates.length})`,
+        h("div", { class: "derived-warning" }, "⚠ ", analysis.disclaimers.candidates),
+        h("p", { class: "small" }, image.candidates.length === 4
+          ? "Both hemisphere references are unknown → 2 × 2 = 4 mathematically possible coordinates."
+          : image.candidates.length === 2
+            ? "One hemisphere reference is unknown → 2 mathematically possible coordinates."
+            : "Candidates after removing duplicates (an axis at 0° has no hemisphere)."),
+        h("div", { class: "inline-actions" },
+          h("label", null, h("input", { type: "checkbox", checked: state.showCandidates, onchange: (e) => setShowCandidates(e.target.checked) }), "Show possible locations on the map")),
+        image.pattern ? h("div", { class: "pattern-note" }, image.pattern.statement, " ", h("span", { class: "muted" }, image.pattern.disclaimer)) : null,
+        h("div", { class: "muted small" }, "Timezone lookup: ", analysis.timezone_lookup.description)),
+      evidenceBlock("context", "Order of the candidates",
+        h("p", { class: "small" }, image.ordering.rule),
+        h("p", { class: "small" }, h("strong", null, image.ordering.note)),
+        h("div", { class: "ev-disclaimer" }, "The order is an inference from the available contextual evidence. It never changes the GPS status: the photo stays ambiguous and no candidate is confirmed.")),
+      ...image.candidates.map((candidate) => buildCandidateCard(image, candidate, analysis)));
+  };
+  loadLocationAnalysis()
+    .then((analysis) => { if (state.selectedId === img.id) render(analysis); })
+    .catch((error) => holder.replaceChildren(h("div", { class: "errors" }, `Could not load analysis: ${error.message}`)));
+  return nodes;
+}
+
+/** Properties (All Images) → Location tab: collection-level view. */
+function buildOverviewLocationTab() {
+  const ambiguous = state.images.filter((img) => img.flags.gps_ambiguous);
+  const resolved = state.images.filter((img) => img.flags.gps).length;
+  const nodes = [evidenceLegend(), kvTable([
+    ["Resolved GPS (on the map)", String(resolved)],
+    ["Ambiguous GPS (not on the map)", String(ambiguous.length)],
+  ])];
+  if (!ambiguous.length) {
+    nodes.push(h("p", { class: "muted" }, "No image has ambiguous GPS – nothing to investigate."));
+    return nodes;
+  }
+  const holder = h("div", null, h("span", { class: "spinner" }), " Building candidate analysis…");
+  nodes.push(h("div", { class: "inline-actions" },
+    h("label", null, h("input", { type: "checkbox", checked: state.showCandidates, onchange: (e) => setShowCandidates(e.target.checked) }), "Show possible locations on the map")), holder);
+  loadLocationAnalysis().then((analysis) => {
+    const rows = Object.values(analysis.images).map((image) => {
+      const supported = image.ordering.most_supported;
+      return h("tr", null,
+        h("td", null, h("a", { href: "#", onclick: (e) => { e.preventDefault(); state.propertiesTab = "location"; selectImage(image.id, "inspector"); } }, image.filename)),
+        h("td", null, String(image.candidates.length)),
+        h("td", null, supported.length ? supported.join(", ") : "–"));
+    });
+    holder.replaceChildren(
+      evidenceBlock("derived", `${analysis.counts.candidates} possible location(s) for ${analysis.counts.ambiguous_images} image(s)`,
+        h("div", { class: "derived-warning" }, "⚠ ", analysis.disclaimers.candidates),
+        h("table", { class: "compare" },
+          h("thead", null, h("tr", null, h("th", null, "Image"), h("th", null, "Candidates"), h("th", null, "Most contextually supported (inference)"))),
+          h("tbody", null, rows))),
+      analysis.patterns.length ? evidenceBlock("context", "Collection patterns",
+        h("ul", { class: "ev-list" }, analysis.patterns.map((p) => h("li", null, p.statement,
+          p.first_capture ? h("span", { class: "muted" }, ` (${p.first_capture} → ${p.last_capture})`) : null))),
+        h("div", { class: "ev-disclaimer" }, analysis.disclaimers.patterns)) : null,
+      h("div", { class: "muted small" }, "Timezone lookup: ", analysis.timezone_lookup.available ? analysis.timezone_lookup.name : analysis.timezone_lookup.description));
+  }).catch((error) => holder.replaceChildren(h("div", { class: "errors" }, error.message)));
+  return nodes;
 }
 
 // --------------------------------------------------------------------------
@@ -870,7 +1253,8 @@ function updateSelectionUI(source) {
     marker.setStyle(markerStyle(markerId === id));
     if (markerId === id) marker.bringToFront();
   }
-  if (source && mapState.map) {
+  updateCandidateSelection(source);
+  if (source && source !== "candidate" && mapState.map) {
     const marker = id && mapState.markers.get(id);
     if (marker) {
       const zoom = Math.max(mapState.map.getZoom(), 13);
@@ -879,7 +1263,7 @@ function updateSelectionUI(source) {
     } else if (!id) {
       mapState.map.closePopup();
       fitMapToMarkers();
-    } else {
+    } else if (!(state.showCandidates && mapState.candidateMarkers.some((m) => m.imageId === id))) {
       mapState.map.closePopup();
     }
   }
@@ -990,6 +1374,10 @@ const COMMANDS = {
   "next-image": { run: () => selectRelative(1), enabled: hasImages },
   "filter-gps": filterCommand("gps"),
   "filter-gps-ambiguous": filterCommand("gps_ambiguous"),
+  "investigate-ambiguous": {
+    run: () => { state.propertiesTab = "location"; selectAllImages(); },
+    enabled: () => state.images.some((img) => img.flags.gps_ambiguous),
+  },
   "filter-timestamp": filterCommand("timestamp"),
   "filter-device": filterCommand("device"),
   "filter-software": filterCommand("software"),
@@ -1002,6 +1390,11 @@ const COMMANDS = {
   "toggle-expand-thumbs": { run: () => toggleControl("toggle-gallery-expand"), checked: () => $("toggle-gallery-expand").checked },
   "toggle-map-path": { run: () => toggleControl("toggle-map-path"), checked: () => $("toggle-map-path").checked },
   "toggle-map-tiles": { run: () => toggleControl("toggle-map-tiles"), checked: () => $("toggle-map-tiles").checked },
+  "toggle-candidates": {
+    run: () => setShowCandidates(!state.showCandidates),
+    checked: () => state.showCandidates,
+    enabled: () => state.images.some((img) => img.flags.gps_ambiguous),
+  },
   "fit-map": { run: () => fitMapToMarkers(), enabled: () => mapState.markers.size > 0 },
   "window-maximize": { run: () => toggleMaximize(), checked: () => $("app-window").classList.contains("maximized") },
   "window-minimize": { run: () => $("app-window").classList.toggle("rolled-up") },
@@ -1087,6 +1480,8 @@ async function clearWorkspace() {
     clearFilters();
     recomputeDerived();
     if (mapState.markerLayer) { mapState.markerLayer.clearLayers(); mapState.markers.clear(); }
+    if (mapState.candidateLayer) { mapState.candidateLayer.clearLayers(); mapState.candidateMarkers = []; }
+    invalidateLocationAnalysis();
     setActionStatus("Workspace cleared", false);
     renderAll();
     toast("Workspace cleared.", "ok");
@@ -1194,6 +1589,8 @@ function showAboutDialog() {
       h("tr", null, h("td", null, "HEIC / HEIF"), h("td", null, status.heif_available ? "enabled (pillow-heif)" : "disabled – pip install pillow-heif")),
       h("tr", null, h("td", null, "Formats"), h("td", null, (status.allowed_extensions || ALLOWED_EXTENSIONS).join(", "))),
       h("tr", null, h("td", null, "Limits"), h("td", null, `${Math.round((status.max_file_size || 0) / 1048576)} MB per file, ${status.max_images || "?"} images`)),
+      h("tr", null, h("td", null, "Timezone lookup"), h("td", null, (status.timezone_lookup || {}).description || "unknown")),
+      (status.timezone_lookup || {}).attribution ? h("tr", null, h("td", null, "Timezone data"), h("td", null, status.timezone_lookup.attribution)) : null,
       h("tr", null, h("td", null, "Map"), h("td", null, "Leaflet · © OpenStreetMap contributors")))),
   ]);
 }
@@ -1201,8 +1598,8 @@ function showAboutDialog() {
 // ==========================================================================
 // PROPERTIES DIALOG (detail panel) – tabs: General | Metadata | Raw EXIF | Privacy | Sanitize
 // ==========================================================================
-const IMAGE_TABS = [["general", "General"], ["metadata", "Metadata"], ["raw", "Raw EXIF"], ["privacy", "Privacy"], ["sanitize", "Sanitize"]];
-const OVERVIEW_TABS = [["general", "General"], ["privacy", "Privacy"], ["sanitize", "Sanitize"]];
+const IMAGE_TABS = [["general", "General"], ["metadata", "Metadata"], ["location", "Location"], ["raw", "Raw EXIF"], ["privacy", "Privacy"], ["sanitize", "Sanitize"]];
+const OVERVIEW_TABS = [["general", "General"], ["location", "Location"], ["privacy", "Privacy"], ["sanitize", "Sanitize"]];
 
 /**
  * Small static icons. The markup below is a CONSTANT written in this file
@@ -1305,6 +1702,7 @@ function buildOverviewTab(tab) {
   const total = all.length;
   const n = (fn) => all.filter(fn).length;
 
+  if (tab === "location") return buildOverviewLocationTab();
   if (tab === "privacy") {
     const rows = Object.entries(CATEGORY_LABELS).map(([category, label]) => {
       const count = n((img) => img.sensitive_categories.includes(category));
@@ -1382,6 +1780,7 @@ function buildOverviewTab(tab) {
 function buildImageTab(tab, detail) {
   const img = state.byId.get(detail.id) || detail;
   if (tab === "metadata") return buildMetadataTab(img, detail);
+  if (tab === "location") return buildLocationTab(img, detail);
   if (tab === "raw") return buildRawMetadata(detail);
   if (tab === "privacy") return buildPrivacyTab(img, detail);
   if (tab === "sanitize") return buildSanitizeTab(img, detail);
@@ -1954,6 +2353,7 @@ function wireEvents() {
   // Map pane
   $("btn-map-fit").addEventListener("click", fitMapToMarkers);
   $("toggle-map-path").addEventListener("change", () => renderMapMarkers());
+  $("toggle-candidates").addEventListener("change", (e) => setShowCandidates(e.target.checked));
   $("toggle-map-tiles").addEventListener("change", (e) => setTilesEnabled(e.target.checked));
 
   // Sanitize options: keep menus + Sanitize tab in sync
