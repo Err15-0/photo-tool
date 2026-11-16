@@ -238,8 +238,11 @@ def _write_sanitized_file(record, workspace, mode, keep_icc, heic_output):
 
 # (label, function(normalized) -> display value or None)
 def _gps_text(n):
-    if n.get("gps_latitude") is not None and n.get("gps_longitude") is not None:
-        return f"{n['gps_latitude']}, {n['gps_longitude']}"
+    """Any GPS coordinate values - resolved OR ambiguous - so removal is verified for both."""
+    if n.get("gps_display"):
+        if n.get("gps_status") == "valid":
+            return n["gps_display"]
+        return f"{n['gps_display']} ({n.get('gps_status')})"
     return None
 
 
@@ -325,7 +328,7 @@ def _build_verification(record, output_path, mode, keep_icc, notes, metadata_res
             "error": f"Verification failed - could not re-read sanitized file: {metadata_result['error']}",
         }
 
-    after = analyze_metadata(metadata_result["raw"], metadata_result["numeric"])
+    after = analyze_metadata(metadata_result["raw"], metadata_result["numeric"], metadata_result["xmp_packet"])
     before = {"normalized": record.normalized, "sensitive": record.sensitive}
     field_rows, category_rows = _compare(before, after, mode)
 
