@@ -45,10 +45,32 @@ function listFiles(dir) {
   console.log(`timezone backend: ${status.timezone_lookup ? status.timezone_lookup.description : "?"}`);
   check(status.image_count === 0, "server starts with an empty workspace");
 
-  // ---- upload sample set + the XSS probe (resolved GPS, HTML in the filename)
+  // ---- each upload control opens the RIGHT picker (regression: "Add Folder" opened the file picker)
+  const chooserFor = async (action) => {
+    const [chooser] = await Promise.all([page.waitForEvent("filechooser", { timeout: 5000 }), action()]);
+    return chooser;
+  };
+  const pickerKind = (chooser) => chooser.element().evaluate((e) => (e.webkitdirectory ? "folder" : "files"));
+  for (const [label, selector, expected] of [
+    ["drop-zone Add Folder…", "#btn-pick-folder", "folder"],
+    ["toolbar Add Folder", '.toolbar [data-command="add-folder"]', "folder"],
+    ["drop-zone Add Images…", "#btn-pick-files", "files"],
+    ["toolbar Add Images", '.toolbar [data-command="add-images"]', "files"],
+  ]) {
+    const chooser = await chooserFor(() => page.click(selector));
+    check(await pickerKind(chooser) === expected, `${label} opens the ${expected} picker`);
+    await page.keyboard.press("Escape");
+  }
+
+  // ---- upload the WHOLE sample folder (with subfolders) through the folder picker
   const files = listFiles(SAMPLES);
-  await page.setInputFiles("#input-files", files);
+  const folderChooser = await chooserFor(() => page.click("#btn-pick-folder"));
+  await folderChooser.setFiles(SAMPLES);
   await page.waitForFunction((n) => document.querySelectorAll("#gallery .thumb-card").length >= n, files.length - 2, { timeout: 180000 });
+  const names = await page.locator("#gallery .thumb-name").allInnerTexts();
+  check(names.includes("IMG_4014.JPG") && names.includes("photo.jpg"), "folder picker uploads files from subfolders too");
+
+  // ---- the XSS probe (resolved GPS, HTML in the filename)
   await page.setInputFiles("#input-files", [{
     name: "<img src=x id=pwn>.jpg", mimeType: "image/jpeg",
     buffer: fs.readFileSync(path.join(SAMPLES, "05_gps_paris.jpg")),
