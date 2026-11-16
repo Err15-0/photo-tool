@@ -67,7 +67,8 @@
           <button type="button" class="menu-item" data-command="prev-image"><span class="mi-check"></span><span class="mi-label">Previous Image</span><span class="mi-key">←</span></button>
           <button type="button" class="menu-item" data-command="next-image"><span class="mi-check"></span><span class="mi-label">Next Image</span><span class="mi-key">→</span></button>
           <div class="menu-sep"></div>
-          <button type="button" class="menu-item" data-command="filter-gps"><span class="mi-check"></span><span class="mi-label">Only Images with GPS</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="filter-gps"><span class="mi-check"></span><span class="mi-label">Only Images with Resolved GPS</span><span class="mi-key"></span></button>
+          <button type="button" class="menu-item" data-command="filter-gps-ambiguous"><span class="mi-check"></span><span class="mi-label">Only Images with Ambiguous GPS</span><span class="mi-key"></span></button>
           <button type="button" class="menu-item" data-command="filter-timestamp"><span class="mi-check"></span><span class="mi-label">Only Images with Timestamp</span><span class="mi-key"></span></button>
           <button type="button" class="menu-item" data-command="filter-device"><span class="mi-check"></span><span class="mi-label">Only Images with Device Info</span><span class="mi-key"></span></button>
           <button type="button" class="menu-item" data-command="filter-software"><span class="mi-check"></span><span class="mi-label">Only Images with Software Info</span><span class="mi-key"></span></button>
@@ -254,6 +255,7 @@
             </div>
             <div class="legend">
               <span class="badge b-gps">GPS</span> location
+              <span class="badge b-gpsamb">GPS ±?</span> hemisphere unknown
               <span class="badge b-time">TIME</span> timestamp
               <span class="badge b-dev">DEV</span> camera/device
               <span class="badge b-sw">SW</span> software
@@ -273,7 +275,8 @@
             </div>
             <div class="filters">
               <span class="filters-label">Show only:</span>
-              <label><input type="checkbox" data-filter="gps"> GPS</label>
+              <label title="GPS with known hemisphere (on the map)"><input type="checkbox" data-filter="gps"> GPS</label>
+              <label title="GPS coordinates present but hemisphere reference missing or unusable (not on the map)"><input type="checkbox" data-filter="gps_ambiguous"> Ambiguous GPS</label>
               <label><input type="checkbox" data-filter="timestamp"> Timestamp</label>
               <label><input type="checkbox" data-filter="device"> Device</label>
               <label><input type="checkbox" data-filter="software"> Software</label>

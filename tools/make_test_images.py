@@ -22,6 +22,9 @@ The batch covers the manual test checklist in README.md:
   - JPEG with bogus 0,0 GPS
   - PNG file misnamed as .jpg
   - HEIC "iPhone" photos with GPS (only if pillow-heif is installed)
+  - GPS hemisphere edge cases (CTF-style): S/E and S/W photos, and photos whose
+    GPSLatitudeRef / GPSLongitudeRef is missing or malformed, plus an XMP
+    coordinate without its N/S/E/W letter -> must show as "ambiguous GPS"
 """
 
 import os
@@ -186,6 +189,35 @@ def main():
                  "-DateTimeOriginal=2024:07:05 09:02:11", *gps_tags(40.7484, -73.9857, 20.0))
     else:
         print("pillow-heif not installed: skipping HEIC samples (pip install pillow-heif)")
+
+    # 21-27. GPS hemisphere edge cases
+    p = make_picture(out("21_gps_south_east_sydney.jpg"), "S/E Sydney", (20, 110, 150))
+    exiftool(p, "-Make=Apple", "-Model=iPhone 14", *gps_tags(-33.8568, 151.2153))
+    p = make_picture(out("22_gps_south_west_rio.jpg"), "S/W Rio", (20, 140, 70))
+    exiftool(p, "-Make=Apple", "-Model=iPhone 14", *gps_tags(-22.9519, -43.2105))
+    # Written with valid refs first, then the ref tag is deleted -> hemisphere unknown.
+    p = make_picture(out("23_gps_missing_lat_ref.jpg"), "No GPSLatitudeRef", (150, 100, 20))
+    exiftool(p, "-Make=Generic", "-Model=CTF Cam", *gps_tags(-33.8568, 151.2153))
+    exiftool(p, "-GPSLatitudeRef=")
+    p = make_picture(out("24_gps_missing_lon_ref.jpg"), "No GPSLongitudeRef", (150, 70, 20))
+    exiftool(p, "-Make=Generic", "-Model=CTF Cam", *gps_tags(33.4484, -112.0740))
+    exiftool(p, "-GPSLongitudeRef=")
+    p = make_picture(out("25_gps_missing_both_refs.jpg"), "No GPS refs at all", (150, 40, 20))
+    exiftool(p, "-Make=Generic", "-Model=CTF Cam", *gps_tags(-22.9519, -43.2105))
+    exiftool(p, "-GPSLatitudeRef=", "-GPSLongitudeRef=")
+    p = make_picture(out("26_gps_malformed_ref.jpg"), "GPSLatitudeRef = X", (120, 40, 60))
+    exiftool(p, "-Make=Generic", "-Model=CTF Cam", *gps_tags(33.4484, -112.0740))
+    exiftool(p, "-GPSLatitudeRef#=X")
+    p = make_picture(out("27_xmp_gps_no_hemisphere_letter.jpg"), "XMP GPS, no N/S/E/W", (90, 40, 120))
+    sidecar = out("_tmp_no_letter.xmp")
+    with open(sidecar, "w") as handle:
+        handle.write(
+            '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+            '<rdf:Description rdf:about="" xmlns:exif="http://ns.adobe.com/exif/1.0/">'
+            "<exif:GPSLatitude>22,57.114</exif:GPSLatitude><exif:GPSLongitude>43,12.630</exif:GPSLongitude>"
+            "</rdf:Description></rdf:RDF></x:xmpmeta>")
+    exiftool(p, f"-XMP<={sidecar}")
+    os.remove(sidecar)
 
     print(f"Sample images written to {OUTPUT}")
     for root, _dirs, files in os.walk(OUTPUT):

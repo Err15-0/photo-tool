@@ -208,7 +208,7 @@ def api_upload():
         if result["error"]:
             record.metadata_error = result["error"]
         if result["raw"]:
-            analysis = analyze_metadata(result["raw"], result["numeric"])
+            analysis = analyze_metadata(result["raw"], result["numeric"], result["xmp_packet"])
             record.raw = analysis["raw"]
             record.normalized = analysis["normalized"]
             record.sensitive = analysis["sensitive"]

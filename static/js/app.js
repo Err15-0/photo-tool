@@ -52,7 +52,8 @@ const CATEGORY_LABELS = {
 
 // Filters available as checkboxes / stat cards.
 const FLAG_FILTERS = {
-  gps: (img) => !!img.flags.gps,
+  gps: (img) => !!img.flags.gps,                       // hemisphere known -> on the map
+  gps_ambiguous: (img) => !!img.flags.gps_ambiguous,   // values present, hemisphere unknown
   timestamp: (img) => !!img.flags.timestamp,
   device: (img) => !!img.flags.device,
   software: (img) => !!img.flags.software,
@@ -140,10 +141,30 @@ function formatBytes(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+/** Signed coordinates - ONLY for resolved ("valid") GPS. Never for ambiguous GPS. */
 function formatGps(img) {
   const n = img.normalized;
-  if (n.gps_latitude === null || n.gps_latitude === undefined) return null;
+  if (n.gps_status !== "valid") return null;
   return `${Number(n.gps_latitude).toFixed(5)}, ${Number(n.gps_longitude).toFixed(5)}`;
+}
+
+// Human labels for normalized.gps_status (same states as photo_tool/gps.py)
+const GPS_STATUS_LABELS = {
+  valid: "Resolved (hemisphere known)",
+  zero: "0,0 placeholder – not plotted",
+  ambiguous: "Ambiguous – hemisphere unknown, not plotted",
+  invalid: "Out of range – not plotted",
+  incomplete: "Incomplete – not plotted",
+};
+
+/** One-line GPS description for any status (raw values shown for ambiguous GPS). */
+function gpsSummary(img) {
+  const n = img.normalized;
+  if (!n.gps_status) return null;
+  if (n.gps_status === "valid") return formatGps(img);
+  if (n.gps_status === "zero") return "0, 0 (placeholder – not plotted)";
+  if (n.gps_status === "ambiguous") return `${n.gps_display} – hemisphere unknown, not plotted`;
+  return `${n.gps_display ? `${n.gps_display} – ` : ""}${GPS_STATUS_LABELS[n.gps_status] || n.gps_status}`;
 }
 
 function extensionOf(name) {
@@ -255,7 +276,7 @@ function sortValue(img, key) {
     case "timestamp": return n.timestamp_sortable || null;
     case "device": return n.device ? n.device.toLowerCase() : null;
     case "software": return n.software ? n.software.toLowerCase() : null;
-    case "gps": return img.flags.gps ? 1 : null;
+    case "gps": return img.flags.gps ? 2 : img.flags.gps_ambiguous ? 1 : null;
     case "pixels": return img.width * img.height;
     case "size": return img.file_size;
     case "sensitivity": return img.sensitive_categories.length;
@@ -303,8 +324,9 @@ function exposureBadges(img) {
   const f = img.flags || {};
   const out = [];
   if (img.metadata_error) out.push(badge("ERR", "b-dirty", img.metadata_error));
-  if (f.gps) out.push(badge("GPS", "b-gps", "Usable GPS coordinates"));
-  else if (f.location_tags) out.push(badge("GPS?", "b-gpsx", "Location tags present but no usable coordinates"));
+  if (f.gps) out.push(badge("GPS", "b-gps", "GPS coordinates with known hemisphere (shown on the map)"));
+  else if (f.gps_ambiguous) out.push(badge("GPS ±?", "b-gpsamb", img.normalized.gps_message || "GPS coordinates present, hemisphere unknown"));
+  else if (f.location_tags) out.push(badge("GPS?", "b-gpsx", "Location tags present but no usable coordinates (0,0 / invalid / incomplete / place names)"));
   if (f.timestamp) out.push(badge("TIME", "b-time", "Timestamp metadata"));
   if (f.device) out.push(badge("DEV", "b-dev", "Camera / device metadata"));
   if (f.software) out.push(badge("SW", "b-sw", "Software / editor metadata"));
@@ -369,7 +391,8 @@ function renderStats() {
 
   const cards = [
     { label: "Total images", value: total, sub: formatBytes(all.reduce((s, i) => s + i.file_size, 0)), onclick: () => selectAllImages() },
-    { label: "With GPS", value: count(FLAG_FILTERS.gps), sub: pct(count(FLAG_FILTERS.gps)), cls: "s-gps", filter: "gps" },
+    { label: "With GPS (resolved)", value: count(FLAG_FILTERS.gps), sub: pct(count(FLAG_FILTERS.gps)), cls: "s-gps", filter: "gps" },
+    { label: "Ambiguous GPS", value: count(FLAG_FILTERS.gps_ambiguous), sub: count(FLAG_FILTERS.gps_ambiguous) ? "hemisphere unknown" : "", cls: count(FLAG_FILTERS.gps_ambiguous) ? "s-amb" : "", filter: "gps_ambiguous" },
     { label: "With timestamps", value: count(FLAG_FILTERS.timestamp), sub: pct(count(FLAG_FILTERS.timestamp)), cls: "s-time", filter: "timestamp" },
     { label: "With camera/device", value: count(FLAG_FILTERS.device), sub: pct(count(FLAG_FILTERS.device)), cls: "s-dev", filter: "device" },
     { label: "With software/editor", value: count(FLAG_FILTERS.software), sub: pct(count(FLAG_FILTERS.software)), cls: "s-sw", filter: "software" },
@@ -439,6 +462,7 @@ function renderStatusBar() {
   const all = state.images;
   const total = all.length;
   const gps = all.filter(FLAG_FILTERS.gps).length;
+  const ambiguous = all.filter(FLAG_FILTERS.gps_ambiguous).length;
   const timestamps = all.filter(FLAG_FILTERS.timestamp).length;
   const clean = all.filter((img) => img.sanitization && img.sanitization.verified_clean).length;
   const ticked = tickedImages().length;
@@ -446,6 +470,7 @@ function renderStatusBar() {
   const counts = total
     ? [`${total} image${total === 1 ? "" : "s"}`, `${gps} GPS`, `${timestamps} timestamps`]
     : ["No images"];
+  if (ambiguous) counts.splice(2, 0, `${ambiguous} ambiguous GPS`);
   if (clean) counts.push(`${clean} sanitized`);
   if (ticked) counts.push(`${ticked} ticked`);
   $("sb-counts").textContent = counts.join("  |  ");
@@ -531,8 +556,15 @@ function renderTable() {
     const n = img.normalized;
     const gps = formatGps(img);
     let gpsCell = dash(gps);
-    if (!img.flags.gps && n.gps_status === "zero") gpsCell = "0, 0 (ignored)";
-    else if (!img.flags.gps && n.gps_status) gpsCell = `(${n.gps_status})`;
+    if (n.gps_status === "ambiguous") {
+      // Raw values stay visible; "?" marks the axis whose hemisphere is unknown.
+      const axis = (raw, ref) => `${raw === null || raw === undefined ? "?" : Number(raw).toFixed(5)} ${ref || "?"}`;
+      gpsCell = h("span", { title: n.gps_message },
+        h("div", null, axis(n.gps_raw_latitude, n.gps_latitude_ref)),
+        h("div", null, axis(n.gps_raw_longitude, n.gps_longitude_ref)),
+        h("span", { class: "badge b-gpsamb" }, "hemisphere?"));
+    } else if (n.gps_status === "zero") gpsCell = "0, 0 (ignored)";
+    else if (!img.flags.gps && n.gps_status) gpsCell = h("span", { title: n.gps_message || "" }, `(${n.gps_status})`);
     const checkbox = h("input", {
       type: "checkbox", checked: state.checked.has(img.id),
       onclick: (event) => { event.stopPropagation(); toggleChecked(img.id, event.target.checked); },
@@ -631,9 +663,12 @@ function renderMapMarkers() {
 
   renderMapPaths(withGps);
   const anyGpsAtAll = state.images.some((img) => img.flags.gps);
+  const ambiguousCount = state.images.filter((img) => img.flags.gps_ambiguous).length;
   $("map-empty").textContent = anyGpsAtAll
-    ? "No images with GPS match the current filters."
-    : "No GPS metadata found in this batch.";
+    ? "No images with resolved GPS match the current filters."
+    : ambiguousCount
+      ? `No resolvable GPS locations. ${ambiguousCount} image(s) have GPS coordinates with a missing hemisphere reference – not plotted.`
+      : "No GPS metadata found in this batch.";
   $("map-empty").classList.toggle("hidden", withGps.length > 0);
   if (!state.selectedId) fitMapToMarkers();
   updateMapNote();
@@ -677,12 +712,15 @@ function fitMapToMarkers() {
 function updateMapNote() {
   const notes = [];
   const total = state.images.filter((img) => img.flags.gps).length;
-  if (total) notes.push(`${total} image(s) with GPS.`);
-  const ignored = state.images.filter((img) => !img.flags.gps && img.normalized.gps_status).length;
+  if (total) notes.push(`${total} image(s) with resolved GPS on the map.`);
+  const ambiguous = state.images.filter((img) => img.flags.gps_ambiguous).length;
+  if (ambiguous) notes.push(`${ambiguous} image(s) have GPS coordinates with an unknown hemisphere – NOT plotted (a wrong marker would be worse than none).`);
+  const ignored = state.images.filter((img) => !img.flags.gps && !img.flags.gps_ambiguous && img.normalized.gps_status).length;
   if (ignored) notes.push(`${ignored} image(s) have GPS tags that could not be plotted (0,0 / invalid / incomplete).`);
   if (!mapState.tiles) notes.push("Online tiles are OFF: markers are shown on a blank background and no requests go to OpenStreetMap.");
   const sel = state.selectedId && state.byId.get(state.selectedId);
-  if (sel && !sel.flags.gps) notes.push("The selected image has no GPS coordinates.");
+  if (sel && sel.flags.gps_ambiguous) notes.push("The selected image has GPS coordinates but no usable hemisphere reference, so it is not on the map.");
+  else if (sel && !sel.flags.gps) notes.push("The selected image has no resolved GPS coordinates.");
   $("map-note").textContent = notes.join(" ");
 }
 
@@ -951,6 +989,7 @@ const COMMANDS = {
   "prev-image": { run: () => selectRelative(-1), enabled: hasImages },
   "next-image": { run: () => selectRelative(1), enabled: hasImages },
   "filter-gps": filterCommand("gps"),
+  "filter-gps-ambiguous": filterCommand("gps_ambiguous"),
   "filter-timestamp": filterCommand("timestamp"),
   "filter-device": filterCommand("device"),
   "filter-software": filterCommand("software"),
@@ -1314,7 +1353,8 @@ function buildOverviewTab(tab) {
 
   // general
   const lines = [
-    [n(FLAG_FILTERS.gps), "expose precise GPS location"],
+    [n(FLAG_FILTERS.gps), "expose precise GPS location (hemisphere known, on the map)"],
+    [n(FLAG_FILTERS.gps_ambiguous), "contain GPS coordinates with an unknown hemisphere (shown in Details, not on the map)"],
     [n(FLAG_FILTERS.timestamp), "expose when they were taken / edited"],
     [n(FLAG_FILTERS.device), "identify the camera / phone model"],
     [n((img) => img.flags.identifier), "contain serial numbers or unique IDs"],
@@ -1369,7 +1409,7 @@ function buildGeneralTab(img, detail) {
       kvRow("Dimensions", `${img.width} × ${img.height}` + (img.display_width !== img.width ? ` (displayed ${img.display_width} × ${img.display_height})` : "")),
       kvRow("Date taken", n.timestamp ? `${n.timestamp}${n.timestamp_source ? ` (${n.timestamp_source})` : ""}` : null),
       kvRow("Camera / device", n.device),
-      kvRow("GPS", formatGps(img)),
+      kvRow("GPS", gpsSummary(img)),
       kvRow("Uploaded", img.uploaded_at),
       kvRow("Metadata tags", String(detail.tag_count)))),
     groupTitle("Indicators"),
@@ -1413,7 +1453,14 @@ function buildMetadataTab(img, detail) {
       ["Host computer", n.host_computer],
     ]],
     ["GPS", [
-      ["GPS latitude / longitude", gpsText || (n.gps_status ? `not usable (${n.gps_status})` : null)],
+      ["GPS status", n.gps_status ? GPS_STATUS_LABELS[n.gps_status] || n.gps_status : null],
+      ["GPS latitude / longitude", gpsText || (n.gps_status ? "not resolved – see raw values below" : null)],
+      ["Raw latitude", n.gps_raw_latitude !== null && n.gps_raw_latitude !== undefined
+        ? `${n.gps_raw_latitude}  (reference: ${n.gps_latitude_ref || "MISSING / unusable"})` : null],
+      ["Raw longitude", n.gps_raw_longitude !== null && n.gps_raw_longitude !== undefined
+        ? `${n.gps_raw_longitude}  (reference: ${n.gps_longitude_ref || "MISSING / unusable"})` : null],
+      ["GPS source", n.gps_source],
+      ["GPS note", [n.gps_status !== "valid" ? n.gps_message : null, ...(n.gps_notes || [])].filter(Boolean).join(" ") || null],
       ["GPS altitude", n.gps_altitude !== null && n.gps_altitude !== undefined ? `${n.gps_altitude} m` : null],
       ["GPS date/time", n.gps_datetime],
     ]],
@@ -1450,6 +1497,16 @@ function buildPrivacyTab(img, detail) {
         h("ul", null, tags.slice(0, 60).map((t) => h("li", null, h("span", { class: "raw-tag" }, t.key), " = ", t.value)),
           tags.length > 60 ? h("li", null, `… ${tags.length - 60} more (see Raw EXIF)`) : null));
     })));
+  }
+  if (img.flags.gps_ambiguous) {
+    nodes.push(groupTitle("Location"),
+      h("div", { class: "warnings" },
+        h("strong", null, "GPS coordinates present, but the hemisphere is unknown."), " ",
+        n.gps_message, " Not placed on the map. The hemisphere is deliberately NOT inferred from timezone, locale, filename or other context."),
+      h("table", { class: "kv" }, h("tbody", null,
+        kvRow("Raw latitude", n.gps_raw_latitude !== null ? `${n.gps_raw_latitude}  (${n.gps_latitude_ref || "reference missing / unusable"})` : null),
+        kvRow("Raw longitude", n.gps_raw_longitude !== null ? `${n.gps_raw_longitude}  (${n.gps_longitude_ref || "reference missing / unusable"})` : null),
+        kvRow("Source", n.gps_source))));
   }
   if (img.flags.gps) {
     nodes.push(groupTitle("Location"),
@@ -1615,7 +1672,15 @@ function buildRawMetadata(detail) {
     tbody.replaceChildren(...rows);
   };
   fill("");
+  const n = detail.normalized || {};
+  const gpsCaveat = ["ambiguous", "invalid", "incomplete"].includes(n.gps_status)
+    ? h("div", { class: "warnings small" },
+      `GPS status: ${GPS_STATUS_LABELS[n.gps_status]}. Careful: ExifTool's own display can look resolved when it is not – `,
+      "Composite:GPSPosition is printed without hemispheres, and XMP coordinates without an N/S/E/W letter are printed with an assumed N/E. ",
+      "Use Metadata → GPS for the interpreted status.")
+    : null;
   return [
+    gpsCaveat,
     h("div", { class: "muted small" }, `${keys.length} tags from ExifTool. Group = family-0:family-1. Red rows belong to a sensitive category. Filesystem tags of the temporary server copy are hidden.`),
     h("input", { type: "search", class: "raw-filter", placeholder: "Filter tags or values…", oninput: (e) => fill(e.target.value) }),
     h("table", { class: "kv" }, tbody),
