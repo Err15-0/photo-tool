@@ -232,7 +232,10 @@ def _exif_record(numeric):
                 f"ExifTool {composite_key} ({composite}) disagrees with the explicit reference; "
                 f"using the reference ({axis['signed']})"
             )
-    if used_composite:
+    unusable = [a["ref_name"] for a in (record["lat"], record["lon"]) if a is not None and a["problem"]]
+    if unusable:
+        record["source"] = f"EXIF GPS ({' and '.join(unusable)} missing or unusable)"
+    elif used_composite:
         record["source"] = "EXIF GPS (ExifTool signed Composite, reference tags verified)"
     else:
         record["source"] = "EXIF GPS + reference tags"
@@ -337,6 +340,10 @@ def interpret_gps(numeric, xmp_packet=None):
     result = {
         "status": None, "latitude": None, "longitude": None, "altitude": altitude,
         "raw_latitude": None, "raw_longitude": None, "latitude_ref": None, "longitude_ref": None,
+        # per axis: None (ok) / "missing" / "invalid", the raw ref value and the tag name
+        "latitude_ref_problem": None, "longitude_ref_problem": None,
+        "latitude_ref_raw": None, "longitude_ref_raw": None,
+        "latitude_ref_name": None, "longitude_ref_name": None,
         "missing_refs": [], "invalid_refs": [], "source": None, "message": None,
         "notes": notes, "display": None,
     }
@@ -353,6 +360,9 @@ def interpret_gps(numeric, xmp_packet=None):
             if axis is not None:
                 result[f"raw_{prefix}"] = axis["raw"]
                 result[f"{prefix}_ref"] = axis["ref"]
+                result[f"{prefix}_ref_problem"] = axis["problem"]
+                result[f"{prefix}_ref_raw"] = axis["ref_raw"]
+                result[f"{prefix}_ref_name"] = axis["ref_name"]
 
     if state is None:
         result["status"] = "incomplete" if has_gps_tags else None

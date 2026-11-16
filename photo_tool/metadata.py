@@ -34,6 +34,7 @@ import shutil
 import subprocess
 
 from . import config
+from .capture_time import extract_capture_time
 from .gps import interpret_gps
 
 log = logging.getLogger(__name__)
@@ -381,6 +382,12 @@ def normalize_metadata(raw, numeric, xmp_packet=None):
         "gps_raw_longitude": gps["raw_longitude"],
         "gps_latitude_ref": gps["latitude_ref"],   # "N"/"S" or None
         "gps_longitude_ref": gps["longitude_ref"], # "E"/"W" or None
+        "gps_latitude_ref_problem": gps["latitude_ref_problem"],    # None / "missing" / "invalid"
+        "gps_longitude_ref_problem": gps["longitude_ref_problem"],
+        "gps_latitude_ref_raw": gps["latitude_ref_raw"],
+        "gps_longitude_ref_raw": gps["longitude_ref_raw"],
+        "gps_latitude_ref_name": gps["latitude_ref_name"],
+        "gps_longitude_ref_name": gps["longitude_ref_name"],
         "gps_missing_refs": gps["missing_refs"],
         "gps_invalid_refs": gps["invalid_refs"],
         "gps_source": gps["source"],
@@ -388,6 +395,8 @@ def normalize_metadata(raw, numeric, xmp_packet=None):
         "gps_notes": gps["notes"],
         "gps_display": gps["display"],
         "date_time_original_key": dto_key,
+        # Local capture time paired with the UTC offset of the SAME clock (photo_tool/capture_time.py).
+        "capture_time": extract_capture_time(raw),
     }
     return normalized
 

@@ -146,6 +146,7 @@ class Workspace:
     def __init__(self):
         self._lock = threading.RLock()
         self._images = {}          # id -> ImageRecord, insertion-ordered
+        self.revision = 0          # bumped on every change (cache key for derived analyses)
         self.root = None
         self._create_directories()
         atexit.register(self.destroy)
@@ -176,6 +177,7 @@ class Workspace:
     def add(self, record):
         with self._lock:
             self._images[record.id] = record
+            self.revision += 1
 
     def get(self, image_id):
         if not is_valid_image_id(image_id):
@@ -196,6 +198,7 @@ class Workspace:
         """Delete every image and file, then start with a fresh directory."""
         with self._lock:
             self._images.clear()
+            self.revision += 1
             old_root = self.root
             self._create_directories()
         shutil.rmtree(old_root, ignore_errors=True)

@@ -181,6 +181,76 @@ Where ambiguous GPS shows up in the UI:
 
 Sanitize verification also reports ambiguous coordinates as **Removed**.
 
+### Investigating ambiguous GPS: candidates and contextual evidence (`photo_tool/location_analysis.py`)
+**Principle: Photo Tool may help you reason about uncertainty, but it never disguises inference as metadata fact.** Ambiguous GPS stays `ambiguous` and stays off the normal map. The investigation layer below is **off by default** and sits on top of that behaviour.
+
+#### Why a missing hemisphere matters: the mirror effect
+The CTF image that exposed the bug has `GPSLatitude = 38.551734`, `GPSLongitude = 78.333293`, and **no** `GPSLatitudeRef` / `GPSLongitudeRef`. Those two unsigned numbers fit four places on Earth:
+
+| Candidate | Coordinates | What is there |
+|---|---|---|
+| N/W | 38.551734° N, 78.333293° W | Shenandoah Valley, Virginia, USA |
+| N/E | 38.551734° N, 78.333293° E | Xinjiang, China – about **11,100 km** away |
+| S/E | 38.551734° S, 78.333293° E | Southern Indian Ocean |
+| S/W | 38.551734° S, 78.333293° W | South Pacific, off Chile |
+
+Older Photo Tool versions (and many tools) silently read a missing reference as N/E, which would have put this Virginia photo in western China. Each missing reference doubles the possibilities: **one missing → 2 candidates, both missing → 2 × 2 = 4**. If an axis is exactly 0°, both hemispheres give the same point, so the duplicates are removed. A malformed reference (e.g. `X`) is treated as unknown: both hemispheres are listed and `X` is never interpreted.
+
+#### The four evidence layers
+Kept apart in the backend (`kind` fields in `/api/location-analysis`) and in the UI (Properties → **Location** tab):
+
+| Layer | Meaning | UI label |
+|---|---|---|
+| Raw metadata | what is literally in the file (magnitudes, the reference tags or "missing") | grey **RAW METADATA** |
+| Resolved metadata | conclusions supported by authoritative metadata. For ambiguous GPS: *none* | green **RESOLVED METADATA** |
+| Derived candidates | mathematically possible coordinates | amber dashed **DERIVED – NOT METADATA** |
+| Contextual evidence | timezone consistency, related photos in the collection | blue dotted **CONTEXTUAL EVIDENCE – INFERENCE** |
+
+#### Showing possible locations
+Tick **Show possible locations** in the GPS Locations pane (or View → Show Possible Locations). Then:
+* Each candidate appears as a **dashed hollow "?" marker**, never as the solid red dot used for resolved GPS.
+* A small **blue dot** on the marker means contextual evidence exists for that candidate.
+* The tooltip and popup say e.g. *"Possible location — N/W (derived – not confirmed)"*.
+* A banner stays on the map while candidates are shown: *"These locations are derived from ambiguous GPS metadata and are not confirmed locations."*
+
+Candidate markers live in their own map layer (`mapState.candidateMarkers`). They never enter the resolved-GPS dataset, the GPS count, the GPS filter, the status bar or the chronological path.
+
+#### Timezone consistency
+For each candidate, Photo Tool can compare the UTC offset recorded in the image with the real offset at that place **on the capture date**:
+* **Recorded offset:** `OffsetTimeOriginal` paired with `DateTimeOriginal`. Fallbacks are `OffsetTimeDigitized`/`CreateDate`, then `OffsetTime`/`ModifyDate` (labelled as modification time), then XMP dates that contain an offset. Malformed offsets such as `+25:00` are reported and ignored, never repaired.
+* **Offset at the candidate:** the IANA rules from Python's `zoneinfo` and the operating system's tz database. This includes DST and historical changes (US rules before and after 2007, Moscow 2011/2014). If the capture time falls in the repeated hour when clocks go back, both offsets count.
+* **Labels:** only **Timezone consistent**, **Timezone inconsistent** or **Timezone unknown**. Never "confirmed" or "correct".
+* **Open ocean:** only nautical zones exist there (`Etc/GMT+5`), so the result is *unknown*. Otherwise the Pacific mirror of the CTF example (`Etc/GMT+5` = UTC−05:00) would look "consistent".
+* **No hemisphere from the sign:** the sign of an offset is never used to guess a hemisphere.
+
+**Why timezone does not prove location:** one offset covers a whole band of longitude, and both hemispheres share it. Cameras are also often set to the wrong timezone, or still on home time while travelling. *Timezone consistency is contextual evidence and does not confirm the location.*
+
+**Current state:** looking up which timezone a *coordinate* lies in needs timezone **boundary** data. Photo Tool does **not** ship boundary data yet and never asks an online service, so the timezone result is currently always *"Timezone unknown – offline timezone boundary data is not installed"*. The comparison engine is implemented and tested (with a test-only lookup). Adding an offline boundary source is a pending decision; see the options in the pull request. `photo_tool/timezones.py → TimezoneLookup` is the plug-in point.
+
+#### Collection context
+For each candidate, Photo Tool looks at the photos in the batch that **do** have resolved GPS:
+* **Support:** a resolved photo from the **same device model** (or same serial number), taken within **6 h**, whose location is within **50 km** of the candidate. Example: *"A photo from the same device model taken 2 minutes earlier (UTC) has a resolved location 1.1 km from this candidate."*
+* **Conflict:** a same-device photo within 6 h that would require travelling faster than **1,000 km/h** to reach this candidate. Example: *"… 11,116 km from this candidate (implied travel: 351,023 km/h – implausible if it is the same camera)."*
+* **Weak context:** the closest resolved photo of *any* device is shown, but labelled *"different/unknown device – no device relationship, weak context"*.
+* **Time differences:** compared in UTC when both photos record an offset, otherwise on the local clock (and labelled that way).
+* **Limits:** at most 5 statements are written out per candidate, but every match is counted.
+
+The thresholds are in `photo_tool/config.py` (`CONTEXT_*`) and are shown next to the results. "Same device" means the same make/model string, which can be a different physical camera.
+
+**Patterns across ambiguous images:** e.g. *"5 image(s) from Apple iPhone 12 have ambiguous GPS with the same pattern: GPSLatitudeRef missing + GPSLongitudeRef missing."* This can reveal how the metadata was processed or damaged. Sharing a pattern does **not** mean the images share a hemisphere.
+
+**No ranking:** candidates are not ranked or given percentages, because there is no statistical model that could back such numbers. Each candidate lists its supporting and conflicting signals, and nothing is hidden.
+
+#### Privacy, network and performance
+* **Network:** no new requests. The analysis uses only the local metadata and the local tz database. Coordinates, timestamps, filenames and images are never sent anywhere. One caveat: with **online map tiles** on, *viewing* candidates on the map downloads OpenStreetMap tiles for those areas, including the true one. Turn tiles off (View menu) for sensitive cases.
+* **Performance:** the analysis runs **only on demand** (Location tab or "Show possible locations"). It is computed in one pass over the collection and cached until the workspace changes. Normal extraction only gained the capture-time parsing, about 7 µs per image. Measured with `python tools/benchmark_location.py`:
+
+| Images | ExifTool processes | On-demand analysis |
+|---|---|---|
+| 10 | 2 | < 3 ms |
+| 100 | 2 | 4–10 ms |
+| 1,000 | 20 (batches of 100 × 2) | 0.16 s (100 ambiguous) – 0.46 s (500 ambiguous × 500 resolved) |
+
 ### How sanitization works (`photo_tool/sanitize.py`)
 | Mode | What happens | Pixels |
 |---|---|---|
@@ -237,6 +307,9 @@ photo-tool/
 │   ├── uploads.py             validation, safe storage, thumbnails/previews
 │   ├── metadata.py            ExifTool runner, normalization, sensitivity rules
 │   ├── gps.py                 GPS interpretation: valid / ambiguous / incomplete (never guesses a hemisphere)
+│   ├── capture_time.py        capture time paired with its UTC offset (validated)
+│   ├── timezones.py           timezone consistency (zoneinfo) + pluggable offline lookup
+│   ├── location_analysis.py   ambiguous GPS: derived candidates + contextual evidence
 │   ├── sanitize.py            sanitization (2 modes) + verification/comparison
 │   ├── downloads.py           safe download names, ZIP building
 │   └── heif_support.py        enables HEIC/HEIF via pillow-heif (optional)
@@ -247,10 +320,12 @@ photo-tool/
 │   ├── js/app.js              all frontend logic (state, rendering, sync, upload)
 │   └── vendor/leaflet/        bundled Leaflet 1.9.4 (BSD-2 licence)
 ├── tests/
-│   └── test_gps.py            GPS hemisphere regression tests (unittest)
+│   ├── test_gps.py            GPS hemisphere regression tests (unittest)
+│   └── test_location_analysis.py  candidates, timezone, collection context, API invariants
 └── tools/
     ├── make_test_images.py    generates a demo/test batch with fake metadata
-    └── smoke_test.py          automated end-to-end test (no browser needed)
+    ├── smoke_test.py          automated end-to-end test (no browser needed)
+    └── benchmark_location.py  extraction + candidate-analysis benchmark (10/100/1000 images)
 ```
 
 ---
@@ -323,10 +398,24 @@ Automated end-to-end check (upload, both sanitize modes, verification, ZIP, orig
 python tools/smoke_test.py
 ```
 
-GPS regression tests: N/E, N/W, S/E, S/W, missing references, malformed references, XMP with and without hemisphere letters, no GPS. The ExifTool-based tests are skipped automatically if ExifTool is not installed.
+Regression tests (63):
+* **GPS:** N/E, N/W, S/E, S/W, missing and malformed references, XMP with and without hemisphere letters, no GPS
+* **Candidates:** 2 or 4 candidates, zero-axis deduplication, 0,0, incomplete pairs
+* **Timezone:** consistent, inconsistent, DST, historical offsets, repeated hour, ocean zones, missing or malformed offset, missing timestamp
+* **Collection context:** same device, unrelated device, patterns
+* **Invariants:** context never promotes to `valid`, candidates never enter the resolved dataset or counts, sanitization unchanged
+
+The ExifTool-based tests are skipped automatically if ExifTool is not installed.
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+Performance check for collections of 10, 100 and 1,000 images:
+```bash
+python tools/benchmark_location.py
+```
+
+The demo set includes `sample_images/ctf_collection/`, an iPhone series near 38.55° N 78.33° W. Some photos have missing references (both, latitude only, longitude only), one is DST-sensitive (6 Nov 2021, −04:00), one has a malformed offset (`+25:00`) and one has no capture time. It also contains an **unrelated** Canon photo near the mirrored N/E candidate and a Sydney Pixel pair with a missing `GPSLongitudeRef`.
 
 ---
 
@@ -350,6 +439,8 @@ Use `sample_images/` (file names below) or your own photos.
 | 12 | Several + ZIP | Tick 3 images → **Sanitize ▾ → Sanitize Ticked Images (3)** → **Export ▾ → Ticked Sanitized Images as ZIP** | `sanitized_images.zip` with `name_sanitized.ext` files. Duplicate names become `photo_sanitized.jpg` and `photo_sanitized_2.jpg`. |
 | 13 | GPS hemispheres | Upload `21_gps_south_east_sydney.jpg`, `22_gps_south_west_rio.jpg`, `02_gps_phoenix_morning.jpg` (N/W), `04_gps_berlin.jpg` (N/E) | All four plotted in the right place; Sydney has a negative latitude, Rio has negative latitude and longitude |
 | 14 | Ambiguous GPS | Upload `23_gps_missing_lat_ref.jpg` … `27_xmp_gps_no_hemisphere_letter.jpg` | **No markers.** `GPS ±?` badge, "Ambiguous GPS" tile = 5, status bar "5 ambiguous GPS". The Details GPS column shows raw values with `?` for the unknown hemisphere. Properties → Metadata shows "reference: MISSING" and names the missing tag. The Privacy tab explains why it is not on the map, with no OpenStreetMap link. |
+| 15 | Possible locations | Upload `sample_images/ctf_collection/`, tick **Show possible locations** | Dashed "?" markers appear: 4 for `IMG_4014.JPG`, 2 for `IMG_4016.JPG`. The resolved-marker count, GPS tile, GPS filter and status bar do **not** change, and the warning banner is shown. The N/W candidates of IMG_4012/4014/4016 carry a blue dot (contextual evidence). Untick the box → the map is back to resolved GPS only. |
+| 16 | Candidate evidence | Select `IMG_4014.JPG` → Properties → **Location** | RAW (both references "missing") / RESOLVED ("none – not resolved") / DERIVED (4 candidates) / INFERENCE. N/W: "A photo from the same device model taken 2 minutes earlier (UTC) has a resolved location 1.1 km from this candidate." N/E: conflict (implausible travel), and the Canon photo is listed only as weak context. Timezone: "unknown – offline timezone boundary data is not installed". Assessment: "Derived candidate · Not confirmed". |
 
 Extra checks:
 * Filters (Details pane or **Analyze** menu), the search box, Batch Summary tiles and Correlation values all filter the thumbnails, table and map together. **All Images** / Esc resets everything.
@@ -428,7 +519,7 @@ Server logs go to the terminal. Start with `PHOTO_TOOL_DEBUG=1` to also see Exif
 * Binds to `127.0.0.1` only. The `Host` header is checked to block DNS-rebinding attacks.
 * State-changing API calls need a custom `X-Photo-Tool` header, which other websites cannot send without a CORS preflight (blocks CSRF).
 * Strict Content-Security-Policy: no inline scripts; images only from self and the OSM tile server. Also `nosniff` and `frame-ancestors 'none'`.
-* Every metadata value and filename is rendered with `textContent`, never `innerHTML`, so a malicious EXIF string cannot inject HTML or JavaScript.
+* Every metadata value and filename is rendered with `textContent`, never `innerHTML`, so a malicious EXIF string cannot inject HTML or JavaScript. Map tooltips and popups get DOM nodes, never strings: Leaflet inserts *string* content as HTML. Candidate marker icons contain only a constant "?".
 * File paths are built only from the server-generated random ID and a canonical extension. The user's filename never touches the filesystem. Download names go through `secure_filename`.
 * The file type comes from the content (magic bytes via Pillow), not the extension. Every image is fully decoded at upload, and decompression bombs are refused (`MAX_IMAGE_PIXELS`).
 * Limits on file size, files per request, request size and total images.
@@ -448,6 +539,9 @@ Server logs go to the terminal. Start with `PHOTO_TOOL_DEBUG=1` to also see Exif
 * The sensitivity rules use tag names. Vendor maker notes are flagged as one category rather than parsed one by one.
 * **GPS altitude:** a missing `GPSAltitudeRef` is read as "above sea level", which is the EXIF default. Latitude/longitude are never defaulted.
 * **GPS sources:** only EXIF and XMP GPS coordinates are interpreted. Video-style QuickTime `GPSCoordinates` are not used for the map.
+* **Timezone consistency:** without an offline timezone boundary source every result is "Timezone unknown" (see the GPS investigation section). Even with one, timezone only narrows candidates: cameras are often set to the wrong or home timezone.
+* **Collection context:** "same device" means the same make/model string (or serial number when recorded). Two people with the same phone model look related. The thresholds (6 h, 50 km, 1,000 km/h) are simple, documented rules, not statistics.
+* **GPSDateStamp/GPSTimeStamp** (UTC) are not yet used to derive a capture offset.
 
 
 ## AI Usage
