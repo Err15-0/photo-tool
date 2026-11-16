@@ -665,6 +665,8 @@ function renderMapMarkers() {
     // Leaflet treats STRING tooltip content as HTML -> always pass a DOM node for untrusted text.
     marker.bindTooltip(h("span", null, img.filename), { direction: "top", offset: [0, -6] });
     marker.on("click", () => selectImage(img.id, "map"));
+    marker.on("mouseover", () => showMapLegend(marker));   // only while candidates are shown
+    marker.on("mouseout", hideMapLegend);
     marker.addTo(mapState.markerLayer);
     mapState.markers.set(img.id, marker);
   }
@@ -816,7 +818,7 @@ function renderCandidateMarkers() {
   mapState.candidateLayer.clearLayers();
   mapState.candidateMarkers = [];
   const showing = state.showCandidates;
-  $("candidate-banner").classList.toggle("hidden", !showing);
+  $("candidate-banner").classList.add("hidden");   // shown only while hovering a map marker
   if (!showing) return;
   if (!state.locationAnalysis) {
     loadLocationAnalysis().then(() => { renderCandidateMarkers(); refreshCandidateBanner(); })
@@ -835,6 +837,8 @@ function renderCandidateMarkers() {
       marker.bindTooltip(h("span", null, `${candidate.label} (derived – not confirmed)`), { direction: "top", offset: [0, -10] });
       marker.bindPopup(() => buildCandidatePopup(image, candidate), { maxWidth: 340 });
       marker.on("click", () => selectImage(image.id, "candidate"));
+      marker.on("mouseover", () => showMapLegend(marker));
+      marker.on("mouseout", hideMapLegend);
       marker.addTo(mapState.candidateLayer);
       mapState.candidateMarkers.push({ marker, imageId: image.id, candidate });
     }
@@ -842,6 +846,29 @@ function renderCandidateMarkers() {
   refreshCandidateBanner();
   // Do not let the "no GPS" overlay hide the candidates.
   if (mapState.candidateMarkers.length) $("map-empty").classList.add("hidden");
+}
+
+let mapLegendTimer = null;
+
+/**
+ * The warning + legend banner is hidden by default and appears while the mouse
+ * is over a map marker (only when "Show possible locations" is on). It opens on
+ * the half of the map AWAY from the hovered marker so it never covers it.
+ * Touch screens have no hover: tapping a candidate opens its popup, which
+ * carries the same warning.
+ */
+function showMapLegend(marker) {
+  if (!state.showCandidates || !mapState.map) return;
+  clearTimeout(mapLegendTimer);
+  const banner = $("candidate-banner");
+  const point = mapState.map.latLngToContainerPoint(marker.getLatLng());
+  banner.classList.toggle("at-bottom", point.y < mapState.map.getSize().y / 2);
+  banner.classList.remove("hidden");
+}
+
+function hideMapLegend() {
+  clearTimeout(mapLegendTimer);
+  mapLegendTimer = setTimeout(() => $("candidate-banner").classList.add("hidden"), 150);
 }
 
 function refreshCandidateBanner() {
@@ -866,11 +893,9 @@ function updateCandidateSelection(source) {
   }
 }
 
-/** fitBounds options that keep markers out from under the candidate banner. */
+/** fitBounds options (the legend banner only appears on hover, so no extra room is needed). */
 function fitOptions(maxZoom) {
-  const banner = $("candidate-banner");
-  const top = banner && !banner.classList.contains("hidden") ? banner.offsetTop + banner.offsetHeight + 24 : 40;
-  return { paddingTopLeft: [40, top], paddingBottomRight: [40, 40], maxZoom };
+  return { padding: [40, 40], maxZoom };
 }
 
 function fitMapToEverything() {

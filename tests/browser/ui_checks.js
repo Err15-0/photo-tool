@@ -92,7 +92,27 @@ function listFiles(dir) {
   check(await page.locator(".leaflet-marker-icon.candidate-icon").count() === analysis.counts.candidates, `candidate markers = ${analysis.counts.candidates}`);
   check(await resolvedMarkers() === resolvedCount, "resolved markers unchanged with candidates shown");
   check(await page.locator("#sb-counts").innerText() === statusBar, "status bar unchanged with candidates shown");
-  check((await page.locator("#candidate-banner").innerText()).includes("not confirmed locations"), "warning banner shown");
+  // warning + legend banner: hidden by default, shown while hovering a marker, never covering it
+  check(!(await page.locator("#candidate-banner").isVisible()), "warning banner hidden until a marker is hovered");
+  await page.evaluate(() => document.getElementById("map").scrollIntoView({ block: "center" }));
+  await page.waitForTimeout(300);
+  const visibleMarker = await page.locator(".leaflet-marker-icon.candidate-icon").evaluateAll((els) => els.findIndex((e) => {
+    const r = e.getBoundingClientRect();
+    return r.top > 0 && r.left > 0 && r.bottom < window.innerHeight && r.right < window.innerWidth;
+  }));
+  const hovered = page.locator(".leaflet-marker-icon.candidate-icon").nth(visibleMarker);
+  const hb = await hovered.boundingBox();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.waitForTimeout(300);
+  const banner = page.locator("#candidate-banner");
+  check(await banner.isVisible() && (await banner.innerText()).includes("not confirmed locations"), "hovering a marker shows the warning banner");
+  const bb = await banner.boundingBox();
+  check(bb.y > hb.y + hb.height || bb.y + bb.height < hb.y, "banner does not cover the hovered marker");
+  const rowTops = await page.locator(".lg-item").evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().top)));
+  check(new Set(rowTops).size === rowTops.length && rowTops.length === 4, "legend: one entry per line");
+  await page.mouse.move(5, 5);
+  await page.waitForTimeout(400);
+  check(!(await banner.isVisible()), "banner hides again when the mouse leaves");
   await page.check('input[data-filter="gps"]');
   await page.waitForTimeout(400);
   check(await page.locator(".leaflet-marker-icon.candidate-icon").count() === 0, "resolved-GPS filter never shows candidates");
